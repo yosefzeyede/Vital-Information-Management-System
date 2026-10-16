@@ -13,7 +13,7 @@ const verifyToken = require("../middleware/authMiddleware");
 const authorizeRoles = require("../middleware/authorizeRoles");
 
 // Only authenticated admins can manage user accounts
-router.post("/", verifyToken, authorizeRoles("admin", "officer"), createUser);
+router.post("/", verifyToken, authorizeRoles("admin"), createUser);
 router.get("/", verifyToken, authorizeRoles("admin", "officer"), getUsers);
 router.get(
   "/:id",
