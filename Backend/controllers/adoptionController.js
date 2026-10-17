@@ -1,5 +1,140 @@
 const connection = require("../config/db");
 
+// ==================== VALIDATION HELPERS ====================
+
+const isPositiveInteger = (value) => {
+  if (
+    value === undefined ||
+    value === null ||
+    (typeof value === "string" && value.trim() === "")
+  ) {
+    return false;
+  }
+
+  const number = Number(value);
+  return Number.isSafeInteger(number) && number > 0;
+};
+
+const isValidDate = (value) => {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return false;
+  }
+
+  const date = new Date(`${value}T00:00:00.000Z`);
+
+  return (
+    !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value
+  );
+};
+
+const isOptionalIdEmpty = (value) =>
+  value === undefined || value === null || value === "";
+
+const normalizeOptionalId = (value) =>
+  isOptionalIdEmpty(value) ? null : Number(value);
+
+const validateOptionalId = (field, value) => {
+  if (!isOptionalIdEmpty(value) && !isPositiveInteger(value)) {
+    return `${field} must be a positive integer or null`;
+  }
+
+  return null;
+};
+
+const validateOptionalText = (field, value, maxLength) => {
+  if (value !== undefined && value !== null && typeof value !== "string") {
+    return `${field} must be a string or null`;
+  }
+
+  if (typeof value === "string" && value.trim().length > maxLength) {
+    return `${field} cannot exceed ${maxLength} characters`;
+  }
+
+  return null;
+};
+
+const normalizeOptionalText = (value) => {
+  if (value === undefined || value === null) {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed === "" ? null : trimmed;
+};
+
+const handleDatabaseError = (error, res, message) => {
+  console.error(message, error);
+
+  if (error.code === "ER_DUP_ENTRY") {
+    return res.status(409).json({
+      message: "This adoption record already exists",
+    });
+  }
+
+  if (
+    error.code === "ER_NO_REFERENCED_ROW_2" ||
+    error.code === "ER_ROW_IS_REFERENCED_2"
+  ) {
+    return res.status(400).json({
+      message:
+        "One or more referenced records do not exist or cannot be changed",
+    });
+  }
+
+  return res.status(500).json({
+    message: "A database error occurred while processing the adoption record",
+  });
+};
+
+// Checks that a person exists.
+// Used inside the transaction so related changes can be rolled back together.
+const checkPersonExists = (personId, callback) => {
+  connection.query(
+    "SELECT person_id FROM persons WHERE person_id = ? LIMIT 1",
+    [personId],
+    (error, rows) => {
+      if (error) return callback(error);
+      callback(null, rows.length > 0);
+    },
+  );
+};
+
+const checkUserExists = (userId, callback) => {
+  connection.query(
+    "SELECT user_id FROM users WHERE user_id = ? LIMIT 1",
+    [userId],
+    (error, rows) => {
+      if (error) return callback(error);
+      callback(null, rows.length > 0);
+    },
+  );
+};
+
+const checkLocationExists = (locationId, callback) => {
+  if (locationId === null) return callback(null, true);
+
+  connection.query(
+    "SELECT location_id FROM locations WHERE location_id = ? LIMIT 1",
+    [locationId],
+    (error, rows) => {
+      if (error) return callback(error);
+      callback(null, rows.length > 0);
+    },
+  );
+};
+
+const rollbackResponse = (res, statusCode, message) => {
+  connection.rollback((rollbackError) => {
+    if (rollbackError) {
+      console.error("Adoption transaction rollback error:", rollbackError);
+    }
+
+    return res.status(statusCode).json({ message });
+  });
+};
+
+// ==================== CREATE ADOPTION ====================
+
 const createAdoption = (req, res) => {
   const {
     person_id,
@@ -14,11 +149,9 @@ const createAdoption = (req, res) => {
 
   // Required fields
   if (
-    person_id === undefined ||
-    person_id === null ||
-    person_id === "" ||
+    isOptionalIdEmpty(person_id) ||
+    isOptionalIdEmpty(registered_by) ||
     !registration_date ||
-    !registered_by ||
     !adoption_date
   ) {
     return res.status(400).json({
@@ -27,90 +160,83 @@ const createAdoption = (req, res) => {
     });
   }
 
-  // Validate positive integer IDs
-  const isPositiveInteger = (value) =>
-    Number.isInteger(Number(value)) && Number(value) > 0;
-
+  // Validate required IDs
   if (!isPositiveInteger(person_id) || !isPositiveInteger(registered_by)) {
     return res.status(400).json({
       message: "Person ID and registered_by must be positive integers",
     });
   }
 
+  // Validate optional IDs
   for (const [field, value] of [
     ["location_id", location_id],
     ["adoptive_father_id", adoptive_father_id],
     ["adoptive_mother_id", adoptive_mother_id],
   ]) {
-    if (
-      value !== undefined &&
-      value !== null &&
-      value !== "" &&
-      !isPositiveInteger(value)
-    ) {
-      return res.status(400).json({
-        message: `${field} must be a positive integer or null`,
-      });
+    const error = validateOptionalId(field, value);
+
+    if (error) {
+      return res.status(400).json({ message: error });
     }
   }
 
-  // Validate YYYY-MM-DD dates
-  const isValidDate = (value) => {
-    if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
-      return false;
-    }
-
-    const date = new Date(`${value}T00:00:00Z`);
-
-    return (
-      !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value
-    );
-  };
-
-  if (!isValidDate(registration_date) || !isValidDate(adoption_date)) {
-    return res.status(400).json({
-      message: "Dates must be valid and use YYYY-MM-DD format",
-    });
-  }
-
-  if (adoption_date < registration_date) {
-    return res.status(400).json({
-      message: "Adoption date cannot be before registration date",
-    });
-  }
-
-  // At least one adoptive parent must be provided
+  // At least one adoptive parent must be supplied
   if (
-    (adoptive_father_id === undefined ||
-      adoptive_father_id === null ||
-      adoptive_father_id === "") &&
-    (adoptive_mother_id === undefined ||
-      adoptive_mother_id === null ||
-      adoptive_mother_id === "")
+    isOptionalIdEmpty(adoptive_father_id) &&
+    isOptionalIdEmpty(adoptive_mother_id)
   ) {
     return res.status(400).json({
       message: "At least one adoptive parent is required",
     });
   }
 
-  const locationId =
-    location_id === undefined || location_id === null || location_id === ""
-      ? null
-      : Number(location_id);
+  const personId = Number(person_id);
+  const registeredBy = Number(registered_by);
+  const locationId = normalizeOptionalId(location_id);
+  const fatherId = normalizeOptionalId(adoptive_father_id);
+  const motherId = normalizeOptionalId(adoptive_mother_id);
 
-  const fatherId =
-    adoptive_father_id === undefined ||
-    adoptive_father_id === null ||
-    adoptive_father_id === ""
-      ? null
-      : Number(adoptive_father_id);
+  // An adopted person cannot be their own adoptive parent
+  if (fatherId === personId || motherId === personId) {
+    return res.status(400).json({
+      message: "The adopted person cannot be their own adoptive parent",
+    });
+  }
 
-  const motherId =
-    adoptive_mother_id === undefined ||
-    adoptive_mother_id === null ||
-    adoptive_mother_id === ""
-      ? null
-      : Number(adoptive_mother_id);
+  // The same person cannot be both adoptive parents
+  if (fatherId !== null && fatherId === motherId) {
+    return res.status(400).json({
+      message: "Adoptive father and mother must be different people",
+    });
+  }
+
+  // Validate dates
+  if (!isValidDate(registration_date) || !isValidDate(adoption_date)) {
+    return res.status(400).json({
+      message: "Dates must be valid and use YYYY-MM-DD format",
+    });
+  }
+
+  // Assumption: the adoption legally occurs on or before its registration.
+  if (adoption_date > registration_date) {
+    return res.status(400).json({
+      message: "Adoption date cannot be after registration date",
+    });
+  }
+
+  const courtReferenceError = validateOptionalText(
+    "court_reference",
+    court_reference,
+    100,
+  );
+
+  if (courtReferenceError) {
+    return res.status(400).json({
+      message: courtReferenceError,
+    });
+  }
+
+  const courtReference = normalizeOptionalText(court_reference);
 
   connection.beginTransaction((transactionError) => {
     if (transactionError) {
@@ -121,91 +247,179 @@ const createAdoption = (req, res) => {
       });
     }
 
-    const recordSql = `
-      INSERT INTO vital_records (
-        person_id,
-        location_id,
-        record_type,
-        registration_date,
-        registered_by,
-        status
-      )
-      VALUES (?, ?, 'Adoption', ?, ?, 'Pending')
-    `;
+    // Validate the adopted person
+    checkPersonExists(personId, (personError, personExists) => {
+      if (personError) {
+        return rollbackResponse(res, 500, "Failed to validate adopted person");
+      }
 
-    connection.query(
-      recordSql,
-      [Number(person_id), locationId, registration_date, Number(registered_by)],
-      (recordError, recordResult) => {
-        if (recordError) {
-          return connection.rollback(() => {
-            console.error("Create adoption record error:", recordError);
+      if (!personExists) {
+        return rollbackResponse(res, 400, "Adopted person does not exist");
+      }
 
-            return res.status(400).json({
-              message:
-                "Failed to create adoption record. Check person, location, and user IDs.",
-            });
-          });
+      // Validate adoptive father, if supplied
+      const checkFather = (callback) => {
+        if (fatherId === null) return callback(null, true);
+        checkPersonExists(fatherId, (error, exists) => callback(error, exists));
+      };
+
+      checkFather((fatherError, fatherExists) => {
+        if (fatherError) {
+          return rollbackResponse(
+            res,
+            500,
+            "Failed to validate adoptive father",
+          );
         }
 
-        const recordId = recordResult.insertId;
+        if (!fatherExists) {
+          return rollbackResponse(res, 400, "Adoptive father does not exist");
+        }
 
-        const adoptionSql = `
-          INSERT INTO adoptions (
-            record_id,
-            adoptive_father_id,
-            adoptive_mother_id,
-            adoption_date,
-            court_reference
-          )
-          VALUES (?, ?, ?, ?, ?)
-        `;
+        // Validate adoptive mother, if supplied
+        const checkMother = (callback) => {
+          if (motherId === null) return callback(null, true);
+          checkPersonExists(motherId, (error, exists) =>
+            callback(error, exists),
+          );
+        };
 
-        connection.query(
-          adoptionSql,
-          [
-            recordId,
-            fatherId,
-            motherId,
-            adoption_date,
-            court_reference || null,
-          ],
-          (adoptionError, adoptionResult) => {
-            if (adoptionError) {
-              return connection.rollback(() => {
-                console.error("Insert adoption details error:", adoptionError);
+        checkMother((motherError, motherExists) => {
+          if (motherError) {
+            return rollbackResponse(
+              res,
+              500,
+              "Failed to validate adoptive mother",
+            );
+          }
 
-                return res.status(400).json({
-                  message:
-                    "Failed to save adoption details. Check adoptive parent IDs.",
-                });
-              });
+          if (!motherExists) {
+            return rollbackResponse(res, 400, "Adoptive mother does not exist");
+          }
+
+          checkUserExists(registeredBy, (userError, userExists) => {
+            if (userError) {
+              return rollbackResponse(
+                res,
+                500,
+                "Failed to validate registering user",
+              );
             }
 
-            connection.commit((commitError) => {
-              if (commitError) {
-                return connection.rollback(() => {
-                  console.error("Commit adoption error:", commitError);
+            if (!userExists) {
+              return rollbackResponse(
+                res,
+                400,
+                "Registering user does not exist",
+              );
+            }
 
-                  return res.status(500).json({
-                    message: "Failed to save adoption record",
-                  });
-                });
+            checkLocationExists(locationId, (locationError, locationExists) => {
+              if (locationError) {
+                return rollbackResponse(
+                  res,
+                  500,
+                  "Failed to validate location",
+                );
               }
 
-              return res.status(201).json({
-                message: "Adoption record created successfully",
-                record_id: recordId,
-                adoption_id: adoptionResult.insertId,
-                status: "Pending",
-              });
+              if (!locationExists) {
+                return rollbackResponse(res, 400, "Location does not exist");
+              }
+
+              const recordSql = `
+                INSERT INTO vital_records (
+                  person_id,
+                  location_id,
+                  record_type,
+                  registration_date,
+                  registered_by,
+                  status
+                )
+                VALUES (?, ?, 'Adoption', ?, ?, 'Pending')
+              `;
+
+              connection.query(
+                recordSql,
+                [personId, locationId, registration_date, registeredBy],
+                (recordError, recordResult) => {
+                  if (recordError) {
+                    return connection.rollback(() => {
+                      handleDatabaseError(
+                        recordError,
+                        res,
+                        "Create adoption vital record error:",
+                      );
+                    });
+                  }
+
+                  const recordId = recordResult.insertId;
+
+                  const adoptionSql = `
+                    INSERT INTO adoptions (
+                      record_id,
+                      adoptive_father_id,
+                      adoptive_mother_id,
+                      adoption_date,
+                      court_reference
+                    )
+                    VALUES (?, ?, ?, ?, ?)
+                  `;
+
+                  connection.query(
+                    adoptionSql,
+                    [
+                      recordId,
+                      fatherId,
+                      motherId,
+                      adoption_date,
+                      courtReference,
+                    ],
+                    (adoptionError, adoptionResult) => {
+                      if (adoptionError) {
+                        return connection.rollback(() => {
+                          handleDatabaseError(
+                            adoptionError,
+                            res,
+                            "Insert adoption details error:",
+                          );
+                        });
+                      }
+
+                      connection.commit((commitError) => {
+                        if (commitError) {
+                          return connection.rollback(() => {
+                            console.error(
+                              "Commit adoption transaction error:",
+                              commitError,
+                            );
+
+                            return res.status(500).json({
+                              message: "Failed to save adoption record",
+                            });
+                          });
+                        }
+
+                        return res.status(201).json({
+                          message: "Adoption record created successfully",
+                          record_id: recordId,
+                          adoption_id: adoptionResult.insertId,
+                          status: "Pending",
+                        });
+                      });
+                    },
+                  );
+                },
+              );
             });
-          },
-        );
-      },
-    );
+          });
+        });
+      });
+    });
   });
 };
+
+// ==================== GET ALL ADOPTIONS ====================
 
 const getAdoptions = (req, res) => {
   const sql = `
@@ -261,14 +475,19 @@ const getAdoptions = (req, res) => {
       });
     }
 
-    return res.status(200).json(results);
+    return res.status(200).json({
+      count: results.length,
+      adoptions: results,
+    });
   });
 };
+
+// ==================== GET ADOPTION BY ID ====================
 
 const getAdoptionById = (req, res) => {
   const { id } = req.params;
 
-  if (!Number.isInteger(Number(id)) || Number(id) <= 0) {
+  if (!isPositiveInteger(id)) {
     return res.status(400).json({
       message: "Invalid adoption ID",
     });
@@ -338,6 +557,8 @@ const getAdoptionById = (req, res) => {
   });
 };
 
+// ==================== UPDATE ADOPTION ====================
+
 const updateAdoption = (req, res) => {
   const { id } = req.params;
 
@@ -352,20 +573,16 @@ const updateAdoption = (req, res) => {
     court_reference,
   } = req.body;
 
-  // Validate adoption ID
-  if (!Number.isInteger(Number(id)) || Number(id) <= 0) {
+  if (!isPositiveInteger(id)) {
     return res.status(400).json({
       message: "Invalid adoption ID",
     });
   }
 
-  // Required fields
   if (
-    person_id === undefined ||
-    person_id === null ||
-    person_id === "" ||
+    isOptionalIdEmpty(person_id) ||
+    isOptionalIdEmpty(registered_by) ||
     !registration_date ||
-    !registered_by ||
     !adoption_date
   ) {
     return res.status(400).json({
@@ -373,9 +590,6 @@ const updateAdoption = (req, res) => {
         "Person ID, registration date, registered by, and adoption date are required",
     });
   }
-
-  const isPositiveInteger = (value) =>
-    Number.isInteger(Number(value)) && Number(value) > 0;
 
   if (!isPositiveInteger(person_id) || !isPositiveInteger(registered_by)) {
     return res.status(400).json({
@@ -388,29 +602,21 @@ const updateAdoption = (req, res) => {
     ["adoptive_father_id", adoptive_father_id],
     ["adoptive_mother_id", adoptive_mother_id],
   ]) {
-    if (
-      value !== undefined &&
-      value !== null &&
-      value !== "" &&
-      !isPositiveInteger(value)
-    ) {
-      return res.status(400).json({
-        message: `${field} must be a positive integer or null`,
-      });
+    const error = validateOptionalId(field, value);
+
+    if (error) {
+      return res.status(400).json({ message: error });
     }
   }
 
-  const isValidDate = (value) => {
-    if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
-      return false;
-    }
-
-    const date = new Date(`${value}T00:00:00Z`);
-
-    return (
-      !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value
-    );
-  };
+  if (
+    isOptionalIdEmpty(adoptive_father_id) &&
+    isOptionalIdEmpty(adoptive_mother_id)
+  ) {
+    return res.status(400).json({
+      message: "At least one adoptive parent is required",
+    });
+  }
 
   if (!isValidDate(registration_date) || !isValidDate(adoption_date)) {
     return res.status(400).json({
@@ -418,36 +624,42 @@ const updateAdoption = (req, res) => {
     });
   }
 
-  if (adoption_date < registration_date) {
+  if (adoption_date > registration_date) {
     return res.status(400).json({
-      message: "Adoption date cannot be before registration date",
+      message: "Adoption date cannot be after registration date",
     });
   }
 
-  const fatherId =
-    adoptive_father_id === undefined ||
-    adoptive_father_id === null ||
-    adoptive_father_id === ""
-      ? null
-      : Number(adoptive_father_id);
+  const courtReferenceError = validateOptionalText(
+    "court_reference",
+    court_reference,
+    100,
+  );
 
-  const motherId =
-    adoptive_mother_id === undefined ||
-    adoptive_mother_id === null ||
-    adoptive_mother_id === ""
-      ? null
-      : Number(adoptive_mother_id);
-
-  if (fatherId === null && motherId === null) {
+  if (courtReferenceError) {
     return res.status(400).json({
-      message: "At least one adoptive parent is required",
+      message: courtReferenceError,
     });
   }
 
-  const locationId =
-    location_id === undefined || location_id === null || location_id === ""
-      ? null
-      : Number(location_id);
+  const personId = Number(person_id);
+  const registeredBy = Number(registered_by);
+  const locationId = normalizeOptionalId(location_id);
+  const fatherId = normalizeOptionalId(adoptive_father_id);
+  const motherId = normalizeOptionalId(adoptive_mother_id);
+  const courtReference = normalizeOptionalText(court_reference);
+
+  if (fatherId === personId || motherId === personId) {
+    return res.status(400).json({
+      message: "The adopted person cannot be their own adoptive parent",
+    });
+  }
+
+  if (fatherId !== null && fatherId === motherId) {
+    return res.status(400).json({
+      message: "Adoptive father and mother must be different people",
+    });
+  }
 
   connection.beginTransaction((transactionError) => {
     if (transactionError) {
@@ -462,7 +674,7 @@ const updateAdoption = (req, res) => {
     }
 
     const checkSql = `
-      SELECT a.adoption_id, a.record_id, vr.status
+      SELECT a.adoption_id, a.record_id, vr.status, a.adoption_date
       FROM adoptions a
       INNER JOIN vital_records vr
         ON a.record_id = vr.record_id
@@ -483,117 +695,208 @@ const updateAdoption = (req, res) => {
       }
 
       if (rows.length === 0) {
-        return connection.rollback(() => {
-          return res.status(404).json({
-            message: "Adoption record not found",
-          });
-        });
+        return rollbackResponse(res, 404, "Adoption record not found");
       }
 
       if (rows[0].status === "Cancelled") {
-        return connection.rollback(() => {
-          return res.status(409).json({
-            message: "Cancelled adoption records cannot be updated",
-          });
-        });
+        return rollbackResponse(
+          res,
+          409,
+          "Cancelled adoption records cannot be updated",
+        );
       }
 
       const recordId = rows[0].record_id;
 
-      const updateRecordSql = `
-        UPDATE vital_records
-        SET person_id = ?,
-            location_id = ?,
-            registration_date = ?,
-            registered_by = ?
-        WHERE record_id = ?
-          AND record_type = 'Adoption'
-      `;
+      checkPersonExists(personId, (personError, personExists) => {
+        if (personError) {
+          return rollbackResponse(
+            res,
+            500,
+            "Failed to validate adopted person",
+          );
+        }
 
-      connection.query(
-        updateRecordSql,
-        [
-          Number(person_id),
-          locationId,
-          registration_date,
-          Number(registered_by),
-          recordId,
-        ],
-        (recordError) => {
-          if (recordError) {
-            return connection.rollback(() => {
-              console.error("Update vital record error:", recordError);
+        if (!personExists) {
+          return rollbackResponse(res, 400, "Adopted person does not exist");
+        }
 
-              return res.status(400).json({
-                message:
-                  "Failed to update main record. Check person, location, and user IDs.",
-              });
-            });
+        const checkFather = (callback) => {
+          if (fatherId === null) return callback(null, true);
+          checkPersonExists(fatherId, callback);
+        };
+
+        checkFather((fatherError, fatherExists) => {
+          if (fatherError) {
+            return rollbackResponse(
+              res,
+              500,
+              "Failed to validate adoptive father",
+            );
           }
 
-          const updateAdoptionSql = `
-            UPDATE adoptions
-            SET adoptive_father_id = ?,
-                adoptive_mother_id = ?,
-                adoption_date = ?,
-                court_reference = ?
-            WHERE adoption_id = ?
-              AND record_id = ?
-          `;
+          if (!fatherExists) {
+            return rollbackResponse(res, 400, "Adoptive father does not exist");
+          }
 
-          connection.query(
-            updateAdoptionSql,
-            [
-              fatherId,
-              motherId,
-              adoption_date,
-              court_reference || null,
-              Number(id),
-              recordId,
-            ],
-            (adoptionError) => {
-              if (adoptionError) {
-                return connection.rollback(() => {
-                  console.error(
-                    "Update adoption details error:",
-                    adoptionError,
-                  );
+          const checkMother = (callback) => {
+            if (motherId === null) return callback(null, true);
+            checkPersonExists(motherId, callback);
+          };
 
-                  return res.status(400).json({
-                    message:
-                      "Failed to update adoption details. Check adoptive parent IDs.",
-                  });
-                });
+          checkMother((motherError, motherExists) => {
+            if (motherError) {
+              return rollbackResponse(
+                res,
+                500,
+                "Failed to validate adoptive mother",
+              );
+            }
+
+            if (!motherExists) {
+              return rollbackResponse(
+                res,
+                400,
+                "Adoptive mother does not exist",
+              );
+            }
+
+            checkUserExists(registeredBy, (userError, userExists) => {
+              if (userError) {
+                return rollbackResponse(
+                  res,
+                  500,
+                  "Failed to validate registering user",
+                );
               }
 
-              connection.commit((commitError) => {
-                if (commitError) {
-                  return connection.rollback(() => {
-                    console.error("Commit adoption update error:", commitError);
+              if (!userExists) {
+                return rollbackResponse(
+                  res,
+                  400,
+                  "Registering user does not exist",
+                );
+              }
 
-                    return res.status(500).json({
-                      message: "Failed to save adoption changes",
-                    });
-                  });
-                }
+              checkLocationExists(
+                locationId,
+                (locationError, locationExists) => {
+                  if (locationError) {
+                    return rollbackResponse(
+                      res,
+                      500,
+                      "Failed to validate location",
+                    );
+                  }
 
-                return res.status(200).json({
-                  message: "Adoption record updated successfully",
-                  adoption_id: Number(id),
-                });
-              });
-            },
-          );
-        },
-      );
+                  if (!locationExists) {
+                    return rollbackResponse(
+                      res,
+                      400,
+                      "Location does not exist",
+                    );
+                  }
+
+                  const updateRecordSql = `
+                  UPDATE vital_records
+                  SET person_id = ?,
+                      location_id = ?,
+                      registration_date = ?,
+                      registered_by = ?
+                  WHERE record_id = ?
+                    AND record_type = 'Adoption'
+                `;
+
+                  connection.query(
+                    updateRecordSql,
+                    [
+                      personId,
+                      locationId,
+                      registration_date,
+                      registeredBy,
+                      recordId,
+                    ],
+                    (recordError) => {
+                      if (recordError) {
+                        return connection.rollback(() => {
+                          handleDatabaseError(
+                            recordError,
+                            res,
+                            "Update adoption vital record error:",
+                          );
+                        });
+                      }
+
+                      const updateAdoptionSql = `
+                      UPDATE adoptions
+                      SET adoptive_father_id = ?,
+                          adoptive_mother_id = ?,
+                          adoption_date = ?,
+                          court_reference = ?
+                      WHERE adoption_id = ?
+                        AND record_id = ?
+                    `;
+
+                      connection.query(
+                        updateAdoptionSql,
+                        [
+                          fatherId,
+                          motherId,
+                          adoption_date,
+                          courtReference,
+                          Number(id),
+                          recordId,
+                        ],
+                        (adoptionError) => {
+                          if (adoptionError) {
+                            return connection.rollback(() => {
+                              handleDatabaseError(
+                                adoptionError,
+                                res,
+                                "Update adoption details error:",
+                              );
+                            });
+                          }
+
+                          connection.commit((commitError) => {
+                            if (commitError) {
+                              return connection.rollback(() => {
+                                console.error(
+                                  "Commit adoption update error:",
+                                  commitError,
+                                );
+
+                                return res.status(500).json({
+                                  message: "Failed to save adoption changes",
+                                });
+                              });
+                            }
+
+                            return res.status(200).json({
+                              message: "Adoption record updated successfully",
+                              adoption_id: Number(id),
+                            });
+                          });
+                        },
+                      );
+                    },
+                  );
+                },
+              );
+            });
+          });
+        });
+      });
     });
   });
 };
 
+// ==================== APPROVE ADOPTION ====================
+
 const approveAdoption = (req, res) => {
   const { id } = req.params;
 
-  if (!Number.isInteger(Number(id)) || Number(id) <= 0) {
+  if (!isPositiveInteger(id)) {
     return res.status(400).json({
       message: "Invalid adoption ID",
     });
@@ -603,7 +906,8 @@ const approveAdoption = (req, res) => {
     UPDATE vital_records vr
     INNER JOIN adoptions a
       ON a.record_id = vr.record_id
-    SET vr.status = 'Active'
+    SET vr.status = 'Active',
+        vr.cancel_reason = NULL
     WHERE a.adoption_id = ?
       AND vr.record_type = 'Adoption'
       AND vr.status = 'Pending'
@@ -630,6 +934,8 @@ const approveAdoption = (req, res) => {
 
       return connection.query(checkSql, [Number(id)], (checkError, rows) => {
         if (checkError) {
+          console.error("Check adoption status error:", checkError);
+
           return res.status(500).json({
             message: "Failed to check adoption record",
           });
@@ -655,11 +961,13 @@ const approveAdoption = (req, res) => {
   });
 };
 
+// ==================== CANCEL ADOPTION ====================
+
 const cancelAdoption = (req, res) => {
   const { id } = req.params;
   const { cancel_reason } = req.body;
 
-  if (!Number.isInteger(Number(id)) || Number(id) <= 0) {
+  if (!isPositiveInteger(id)) {
     return res.status(400).json({
       message: "Invalid adoption ID",
     });
@@ -670,6 +978,14 @@ const cancelAdoption = (req, res) => {
       message: "Cancellation reason is required",
     });
   }
+
+  if (cancel_reason.trim().length > 500) {
+    return res.status(400).json({
+      message: "Cancellation reason cannot exceed 500 characters",
+    });
+  }
+
+  const reason = cancel_reason.trim();
 
   const sql = `
     UPDATE vital_records vr
@@ -682,7 +998,7 @@ const cancelAdoption = (req, res) => {
       AND vr.status IN ('Pending', 'Active')
   `;
 
-  connection.query(sql, [cancel_reason.trim(), Number(id)], (error, result) => {
+  connection.query(sql, [reason, Number(id)], (error, result) => {
     if (error) {
       console.error("Cancel adoption error:", error);
 
@@ -693,16 +1009,18 @@ const cancelAdoption = (req, res) => {
 
     if (result.affectedRows === 0) {
       const checkSql = `
-          SELECT vr.status
-          FROM adoptions a
-          INNER JOIN vital_records vr
-            ON a.record_id = vr.record_id
-          WHERE a.adoption_id = ?
-            AND vr.record_type = 'Adoption'
-        `;
+        SELECT vr.status
+        FROM adoptions a
+        INNER JOIN vital_records vr
+          ON a.record_id = vr.record_id
+        WHERE a.adoption_id = ?
+          AND vr.record_type = 'Adoption'
+      `;
 
       return connection.query(checkSql, [Number(id)], (checkError, rows) => {
         if (checkError) {
+          console.error("Check adoption status error:", checkError);
+
           return res.status(500).json({
             message: "Failed to check adoption record",
           });
@@ -724,10 +1042,12 @@ const cancelAdoption = (req, res) => {
       message: "Adoption record cancelled successfully",
       adoption_id: Number(id),
       status: "Cancelled",
-      cancel_reason: cancel_reason.trim(),
+      cancel_reason: reason,
     });
   });
 };
+
+// ==================== EXPORTS ====================
 
 module.exports = {
   createAdoption,

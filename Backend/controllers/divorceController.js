@@ -1,5 +1,66 @@
 const connection = require("../config/db");
 
+// =====================================================
+// REUSABLE VALIDATION HELPERS
+// =====================================================
+
+const isPositiveInteger = (value) => {
+  if (
+    value === null ||
+    value === undefined ||
+    typeof value === "boolean" ||
+    (typeof value === "string" && value.trim() === "")
+  ) {
+    return false;
+  }
+
+  const number = Number(value);
+
+  return Number.isSafeInteger(number) && number > 0;
+};
+
+const isValidDate = (value) => {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return false;
+  }
+
+  const date = new Date(`${value}T00:00:00Z`);
+
+  return (
+    !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value
+  );
+};
+
+const isOptionalText = (value, maxLength) =>
+  value == null ||
+  value === "" ||
+  (typeof value === "string" && value.length <= maxLength);
+
+const normalizeOptionalText = (value) =>
+  value == null || value === "" ? null : value.trim();
+
+const handleDatabaseError = (error, res, message) => {
+  console.error(message, error);
+
+  if (error.code === "ER_NO_REFERENCED_ROW_2") {
+    return res.status(400).json({
+      message: "One or more referenced records do not exist",
+    });
+  }
+
+  if (error.code === "ER_DUP_ENTRY") {
+    return res.status(409).json({
+      message: "A divorce record already exists for this marriage",
+    });
+  }
+
+  return res.status(500).json({ message });
+};
+
+// =====================================================
+// CREATE DIVORCE
+// =====================================================
+
 const createDivorce = (req, res) => {
   const {
     marriage_id,
@@ -9,230 +70,250 @@ const createDivorce = (req, res) => {
     divorce_date,
     reason,
     court_reference,
-  } = req.body;
+  } = req.body || {};
 
-  // Validate required fields
-  if (!marriage_id || !registration_date || !registered_by || !divorce_date) {
+  // 1. Required fields
+  if (
+    marriage_id == null ||
+    marriage_id === "" ||
+    registration_date == null ||
+    registration_date === "" ||
+    registered_by == null ||
+    registered_by === "" ||
+    divorce_date == null ||
+    divorce_date === ""
+  ) {
     return res.status(400).json({
       message:
         "marriage_id, registration_date, registered_by, and divorce_date are required",
     });
   }
 
-  // Validate IDs
+  // 2. Validate IDs
   if (
-    !Number.isInteger(Number(marriage_id)) ||
-    Number(marriage_id) <= 0 ||
-    !Number.isInteger(Number(registered_by)) ||
-    Number(registered_by) <= 0 ||
+    !isPositiveInteger(marriage_id) ||
+    !isPositiveInteger(registered_by) ||
     (location_id != null &&
-      (!Number.isInteger(Number(location_id)) || Number(location_id) <= 0))
+      location_id !== "" &&
+      !isPositiveInteger(location_id))
   ) {
     return res.status(400).json({
-      message: "Invalid marriage_id, registered_by, or location_id",
+      message:
+        "marriage_id, registered_by, and location_id must be positive integers",
     });
   }
 
-  // Validate dates
-  const isValidDate = (value) => {
-    if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
-      return false;
-    }
-
-    const date = new Date(`${value}T00:00:00Z`);
-
-    return (
-      !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value
-    );
-  };
-
+  // 3. Validate dates
   if (!isValidDate(registration_date) || !isValidDate(divorce_date)) {
     return res.status(400).json({
       message: "Dates must be valid and use YYYY-MM-DD format",
     });
   }
 
-  if (divorce_date < registration_date) {
+  // A divorce must occur before or on its registration date.
+  if (registration_date < divorce_date) {
     return res.status(400).json({
-      message: "divorce_date cannot be before registration_date",
+      message: "registration_date cannot be earlier than divorce_date",
     });
   }
 
-  // Verify the marriage exists and has not been cancelled
-  const marriageSql = `
-    SELECT marriage_id
-    FROM marriages
-    WHERE marriage_id = ?
+  // 4. Validate optional text
+  if (!isOptionalText(reason, 255)) {
+    return res.status(400).json({
+      message: "reason must be a string of at most 255 characters",
+    });
+  }
+
+  if (!isOptionalText(court_reference, 100)) {
+    return res.status(400).json({
+      message: "court_reference must be a string of at most 100 characters",
+    });
+  }
+
+  // 5. Check references and marriage status
+  const checkSql = `
+    SELECT
+      m.marriage_id,
+      m.marriage_date,
+      vr.status AS marriage_status,
+      (SELECT COUNT(*)
+       FROM users
+       WHERE user_id = ?) AS user_exists,
+      (SELECT COUNT(*)
+       FROM locations
+       WHERE location_id = ?) AS location_exists
+    FROM marriages m
+    INNER JOIN vital_records vr
+      ON vr.record_id = m.record_id
+    WHERE m.marriage_id = ?
+      AND vr.record_type = 'Marriage'
   `;
 
   connection.query(
-    marriageSql,
-    [Number(marriage_id)],
-    (error, marriageRows) => {
+    checkSql,
+    [
+      Number(registered_by),
+      location_id == null || location_id === "" ? null : Number(location_id),
+      Number(marriage_id),
+    ],
+    (error, rows) => {
       if (error) {
-        console.error("Check marriage error:", error);
-
-        return res.status(500).json({
-          message: "Failed to verify marriage record",
-        });
+        return handleDatabaseError(
+          error,
+          res,
+          "Failed to verify marriage and divorce references",
+        );
       }
 
-      if (marriageRows.length === 0) {
+      if (rows.length === 0) {
         return res.status(404).json({
           message: "Marriage record not found",
         });
       }
 
-      const sql = `
-        SELECT m.marriage_id
-        FROM marriages m
-        INNER JOIN vital_records vr
-          ON vr.record_id = m.record_id
-        WHERE m.marriage_id = ?
-          AND vr.status = 'Active'
-      `;
+      const marriage = rows[0];
 
-      connection.query(sql, [Number(marriage_id)], (error, activeRows) => {
-        if (error) {
-          console.error("Verify active marriage error:", error);
-
-          return res.status(500).json({
-            message: "Failed to verify marriage status",
-          });
-        }
-
-        if (activeRows.length === 0) {
-          return res.status(400).json({
-            message:
-              "Only an active marriage can be used to create a divorce record",
-          });
-        }
-
-        createDivorceTransaction();
-      });
-    },
-  );
-
-  function createDivorceTransaction() {
-    connection.beginTransaction((error) => {
-      if (error) {
-        console.error("Begin divorce transaction error:", error);
-
-        return res.status(500).json({
-          message: "Failed to start divorce transaction",
+      if (!Number(marriage.user_exists)) {
+        return res.status(400).json({
+          message: "registered_by user does not exist",
         });
       }
 
-      const vitalSql = `
-        INSERT INTO vital_records
-        (
-          person_id,
-          location_id,
-          record_type,
-          registration_date,
-          registered_by,
-          status
-        )
-        VALUES (NULL, ?, 'Divorce', ?, ?, 'Pending')
-      `;
+      if (
+        location_id != null &&
+        location_id !== "" &&
+        !Number(marriage.location_exists)
+      ) {
+        return res.status(400).json({
+          message: "location_id does not exist",
+        });
+      }
 
-      connection.query(
-        vitalSql,
-        [
-          location_id ? Number(location_id) : null,
-          registration_date,
-          Number(registered_by),
-        ],
-        (error, vitalResult) => {
-          if (error) {
-            return connection.rollback(() => {
-              console.error("Create divorce vital record error:", error);
+      if (marriage.marriage_status !== "Active") {
+        return res.status(400).json({
+          message:
+            "Only an active marriage can be used to create a divorce record",
+        });
+      }
 
-              if (error.code === "ER_NO_REFERENCED_ROW_2") {
-                return res.status(400).json({
-                  message:
-                    "Invalid location_id or registered_by. Check that the referenced records exist.",
-                });
-              }
+      // Divorce cannot predate the marriage.
+      const marriageDate = new Date(marriage.marriage_date)
+        .toISOString()
+        .slice(0, 10);
 
-              return res.status(500).json({
-                message: "Failed to create divorce record",
+      if (divorce_date < marriageDate) {
+        return res.status(400).json({
+          message: "divorce_date cannot be earlier than marriage_date",
+        });
+      }
+
+      // 6. Create the vital record and divorce details atomically.
+      connection.beginTransaction((transactionError) => {
+        if (transactionError) {
+          return handleDatabaseError(
+            transactionError,
+            res,
+            "Failed to start divorce transaction",
+          );
+        }
+
+        const vitalSql = `
+          INSERT INTO vital_records
+          (
+            person_id,
+            location_id,
+            record_type,
+            registration_date,
+            registered_by,
+            status
+          )
+          VALUES (NULL, ?, 'Divorce', ?, ?, 'Pending')
+        `;
+
+        connection.query(
+          vitalSql,
+          [
+            location_id == null || location_id === ""
+              ? null
+              : Number(location_id),
+            registration_date,
+            Number(registered_by),
+          ],
+          (vitalError, vitalResult) => {
+            if (vitalError) {
+              return connection.rollback(() => {
+                handleDatabaseError(
+                  vitalError,
+                  res,
+                  "Failed to create divorce vital record",
+                );
               });
-            });
-          }
+            }
 
-          const record_id = vitalResult.insertId;
+            const recordId = vitalResult.insertId;
 
-          const divorceSql = `
-            INSERT INTO divorces
-            (
-              record_id,
-              marriage_id,
-              divorce_date,
-              reason,
-              court_reference
-            )
-            VALUES (?, ?, ?, ?, ?)
-          `;
+            const divorceSql = `
+              INSERT INTO divorces
+              (
+                record_id,
+                marriage_id,
+                divorce_date,
+                reason,
+                court_reference
+              )
+              VALUES (?, ?, ?, ?, ?)
+            `;
 
-          connection.query(
-            divorceSql,
-            [
-              record_id,
-              Number(marriage_id),
-              divorce_date,
-              reason || null,
-              court_reference || null,
-            ],
-            (error, divorceResult) => {
-              if (error) {
-                return connection.rollback(() => {
-                  console.error("Create divorce details error:", error);
-
-                  if (error.code === "ER_NO_REFERENCED_ROW_2") {
-                    return res.status(400).json({
-                      message:
-                        "Invalid marriage_id. Check that the marriage exists.",
-                    });
-                  }
-
-                  if (error.code === "ER_DUP_ENTRY") {
-                    return res.status(409).json({
-                      message:
-                        "A divorce record already exists for this marriage",
-                    });
-                  }
-
-                  return res.status(500).json({
-                    message: "Failed to create divorce details",
-                  });
-                });
-              }
-
-              connection.commit((error) => {
-                if (error) {
+            connection.query(
+              divorceSql,
+              [
+                recordId,
+                Number(marriage_id),
+                divorce_date,
+                normalizeOptionalText(reason),
+                normalizeOptionalText(court_reference),
+              ],
+              (divorceError, divorceResult) => {
+                if (divorceError) {
                   return connection.rollback(() => {
-                    console.error("Commit divorce error:", error);
-
-                    return res.status(500).json({
-                      message: "Failed to save divorce record",
-                    });
+                    handleDatabaseError(
+                      divorceError,
+                      res,
+                      "Failed to create divorce details",
+                    );
                   });
                 }
 
-                return res.status(201).json({
-                  message: "Divorce record created successfully",
-                  record_id,
-                  divorce_id: divorceResult.insertId,
+                connection.commit((commitError) => {
+                  if (commitError) {
+                    return connection.rollback(() => {
+                      handleDatabaseError(
+                        commitError,
+                        res,
+                        "Failed to save divorce record",
+                      );
+                    });
+                  }
+
+                  return res.status(201).json({
+                    message: "Divorce record created successfully",
+                    record_id: recordId,
+                    divorce_id: divorceResult.insertId,
+                    status: "Pending",
+                  });
                 });
-              });
-            },
-          );
-        },
-      );
-    });
-  }
+              },
+            );
+          },
+        );
+      });
+    },
+  );
 };
+
+// =====================================================
+// GET ALL DIVORCES
+// =====================================================
 
 const getDivorces = (req, res) => {
   const sql = `
@@ -245,9 +326,9 @@ const getDivorces = (req, res) => {
       d.court_reference,
       m.person1_id,
       m.person2_id,
-      CONCAT(p1.first_name, ' ', p1.middle_name, ' ', p1.last_name)
+      CONCAT_WS(' ', p1.first_name, p1.middle_name, p1.last_name)
         AS person1_name,
-      CONCAT(p2.first_name, ' ', p2.middle_name, ' ', p2.last_name)
+      CONCAT_WS(' ', p2.first_name, p2.middle_name, p2.last_name)
         AS person2_name,
       vr.location_id,
       vr.registration_date,
@@ -269,23 +350,30 @@ const getDivorces = (req, res) => {
 
   connection.query(sql, (error, results) => {
     if (error) {
-      console.error("Get divorces error:", error);
-
-      return res.status(500).json({
-        message: "Failed to retrieve divorce records",
-      });
+      return handleDatabaseError(
+        error,
+        res,
+        "Failed to retrieve divorce records",
+      );
     }
 
-    return res.status(200).json(results);
+    return res.status(200).json({
+      count: results.length,
+      divorces: results,
+    });
   });
 };
+
+// =====================================================
+// GET DIVORCE BY ID
+// =====================================================
 
 const getDivorceById = (req, res) => {
   const { id } = req.params;
 
-  if (!Number.isInteger(Number(id)) || Number(id) <= 0) {
+  if (!isPositiveInteger(id)) {
     return res.status(400).json({
-      message: "Invalid divorce ID",
+      message: "Divorce ID must be a positive integer",
     });
   }
 
@@ -299,9 +387,9 @@ const getDivorceById = (req, res) => {
       d.court_reference,
       m.person1_id,
       m.person2_id,
-      CONCAT(p1.first_name, ' ', p1.middle_name, ' ', p1.last_name)
+      CONCAT_WS(' ', p1.first_name, p1.middle_name, p1.last_name)
         AS person1_name,
-      CONCAT(p2.first_name, ' ', p2.middle_name, ' ', p2.last_name)
+      CONCAT_WS(' ', p2.first_name, p2.middle_name, p2.last_name)
         AS person2_name,
       vr.location_id,
       vr.registration_date,
@@ -323,11 +411,11 @@ const getDivorceById = (req, res) => {
 
   connection.query(sql, [Number(id)], (error, results) => {
     if (error) {
-      console.error("Get divorce by ID error:", error);
-
-      return res.status(500).json({
-        message: "Failed to retrieve divorce record",
-      });
+      return handleDatabaseError(
+        error,
+        res,
+        "Failed to retrieve divorce record",
+      );
     }
 
     if (results.length === 0) {
@@ -340,6 +428,10 @@ const getDivorceById = (req, res) => {
   });
 };
 
+// =====================================================
+// UPDATE DIVORCE
+// =====================================================
+
 const updateDivorce = (req, res) => {
   const { id } = req.params;
 
@@ -349,35 +441,24 @@ const updateDivorce = (req, res) => {
     divorce_date,
     reason,
     court_reference,
-  } = req.body;
+  } = req.body || {};
 
-  // Validate divorce ID
-  if (!Number.isInteger(Number(id)) || Number(id) <= 0) {
+  if (!isPositiveInteger(id)) {
     return res.status(400).json({
-      message: "Invalid divorce ID",
+      message: "Divorce ID must be a positive integer",
     });
   }
 
-  // Required fields
-  if (!registration_date || !divorce_date) {
+  if (
+    registration_date == null ||
+    registration_date === "" ||
+    divorce_date == null ||
+    divorce_date === ""
+  ) {
     return res.status(400).json({
-      message: "Registration date and divorce date are required",
+      message: "registration_date and divorce_date are required",
     });
   }
-
-  // Validate real calendar dates
-  const isValidDate = (date) => {
-    if (typeof date !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-      return false;
-    }
-
-    const parsedDate = new Date(`${date}T00:00:00Z`);
-
-    return (
-      !Number.isNaN(parsedDate.getTime()) &&
-      parsedDate.toISOString().slice(0, 10) === date
-    );
-  };
 
   if (!isValidDate(registration_date) || !isValidDate(divorce_date)) {
     return res.status(400).json({
@@ -385,38 +466,49 @@ const updateDivorce = (req, res) => {
     });
   }
 
-  if (divorce_date < registration_date) {
+  if (registration_date < divorce_date) {
     return res.status(400).json({
-      message: "Divorce date cannot be before registration date",
+      message: "registration_date cannot be earlier than divorce_date",
     });
   }
 
-  // Validate optional location ID
   let locationId = null;
 
-  if (location_id !== undefined && location_id !== null && location_id !== "") {
-    if (!Number.isInteger(Number(location_id)) || Number(location_id) <= 0) {
+  if (location_id != null && location_id !== "") {
+    if (!isPositiveInteger(location_id)) {
       return res.status(400).json({
-        message: "Invalid location ID",
+        message: "location_id must be a positive integer",
       });
     }
 
     locationId = Number(location_id);
   }
 
+  if (!isOptionalText(reason, 255)) {
+    return res.status(400).json({
+      message: "reason must be at most 255 characters",
+    });
+  }
+
+  if (!isOptionalText(court_reference, 100)) {
+    return res.status(400).json({
+      message: "court_reference must be at most 100 characters",
+    });
+  }
+
   const divorceId = Number(id);
 
   connection.beginTransaction((transactionError) => {
     if (transactionError) {
-      console.error("Begin transaction error:", transactionError);
-
-      return res.status(500).json({
-        message: "Failed to start update transaction",
-      });
+      return handleDatabaseError(
+        transactionError,
+        res,
+        "Failed to start update transaction",
+      );
     }
 
     const selectSql = `
-      SELECT d.divorce_id, d.record_id, vr.status
+      SELECT d.divorce_id, d.record_id, d.divorce_date, vr.status
       FROM divorces d
       INNER JOIN vital_records vr
         ON d.record_id = vr.record_id
@@ -428,17 +520,13 @@ const updateDivorce = (req, res) => {
     connection.query(selectSql, [divorceId], (error, results) => {
       if (error) {
         return connection.rollback(() => {
-          console.error("Find divorce error:", error);
-
-          return res.status(500).json({
-            message: "Failed to find divorce record",
-          });
+          handleDatabaseError(error, res, "Failed to find divorce record");
         });
       }
 
       if (results.length === 0) {
         return connection.rollback(() => {
-          return res.status(404).json({
+          res.status(404).json({
             message: "Divorce record not found",
           });
         });
@@ -448,81 +536,123 @@ const updateDivorce = (req, res) => {
 
       if (divorce.status !== "Pending") {
         return connection.rollback(() => {
-          return res.status(409).json({
+          res.status(409).json({
             message: "Only Pending divorce records can be updated",
             current_status: divorce.status,
           });
         });
       }
 
-      const updateRecordSql = `
-        UPDATE vital_records
-        SET location_id = ?,
-            registration_date = ?
-        WHERE record_id = ?
-          AND record_type = 'Divorce'
-          AND status = 'Pending'
+      const marriageSql = `
+        SELECT m.marriage_date
+        FROM divorces d
+        INNER JOIN marriages m
+          ON d.marriage_id = m.marriage_id
+        WHERE d.divorce_id = ?
       `;
 
       connection.query(
-        updateRecordSql,
-        [locationId, registration_date, divorce.record_id],
-        (recordError) => {
-          if (recordError) {
+        marriageSql,
+        [divorceId],
+        (marriageError, marriageRows) => {
+          if (marriageError) {
             return connection.rollback(() => {
-              console.error("Update vital record error:", recordError);
-
-              return res
-                .status(
-                  recordError.code === "ER_NO_REFERENCED_ROW_2" ? 400 : 500,
-                )
-                .json({
-                  message:
-                    recordError.code === "ER_NO_REFERENCED_ROW_2"
-                      ? "The specified location does not exist"
-                      : "Failed to update vital record",
-                });
+              handleDatabaseError(
+                marriageError,
+                res,
+                "Failed to verify marriage date",
+              );
             });
           }
 
-          const updateDivorceSql = `
-            UPDATE divorces
-            SET divorce_date = ?,
-                reason = ?,
-                court_reference = ?
-            WHERE divorce_id = ?
+          if (marriageRows.length === 0) {
+            return connection.rollback(() => {
+              res.status(400).json({
+                message: "The related marriage record does not exist",
+              });
+            });
+          }
+
+          const marriageDate = new Date(marriageRows[0].marriage_date)
+            .toISOString()
+            .slice(0, 10);
+
+          if (divorce_date < marriageDate) {
+            return connection.rollback(() => {
+              res.status(400).json({
+                message: "divorce_date cannot be earlier than marriage_date",
+              });
+            });
+          }
+
+          const updateRecordSql = `
+            UPDATE vital_records
+            SET location_id = ?,
+                registration_date = ?
+            WHERE record_id = ?
+              AND record_type = 'Divorce'
+              AND status = 'Pending'
           `;
 
           connection.query(
-            updateDivorceSql,
-            [divorce_date, reason || null, court_reference || null, divorceId],
-            (divorceError) => {
-              if (divorceError) {
+            updateRecordSql,
+            [locationId, registration_date, divorce.record_id],
+            (recordError) => {
+              if (recordError) {
                 return connection.rollback(() => {
-                  console.error("Update divorce error:", divorceError);
-
-                  return res.status(500).json({
-                    message: "Failed to update divorce details",
-                  });
+                  handleDatabaseError(
+                    recordError,
+                    res,
+                    "Failed to update vital record",
+                  );
                 });
               }
 
-              connection.commit((commitError) => {
-                if (commitError) {
-                  return connection.rollback(() => {
-                    console.error("Commit error:", commitError);
+              const updateDivorceSql = `
+                UPDATE divorces
+                SET divorce_date = ?,
+                    reason = ?,
+                    court_reference = ?
+                WHERE divorce_id = ?
+              `;
 
-                    return res.status(500).json({
-                      message: "Failed to save divorce changes",
+              connection.query(
+                updateDivorceSql,
+                [
+                  divorce_date,
+                  normalizeOptionalText(reason),
+                  normalizeOptionalText(court_reference),
+                  divorceId,
+                ],
+                (divorceError) => {
+                  if (divorceError) {
+                    return connection.rollback(() => {
+                      handleDatabaseError(
+                        divorceError,
+                        res,
+                        "Failed to update divorce details",
+                      );
+                    });
+                  }
+
+                  connection.commit((commitError) => {
+                    if (commitError) {
+                      return connection.rollback(() => {
+                        handleDatabaseError(
+                          commitError,
+                          res,
+                          "Failed to save divorce changes",
+                        );
+                      });
+                    }
+
+                    return res.status(200).json({
+                      message: "Divorce record updated successfully",
+                      divorce_id: divorceId,
                     });
                   });
-                }
-
-                return res.status(200).json({
-                  message: "Divorce record updated successfully",
-                  divorce_id: divorceId,
-                });
-              });
+                },
+              );
             },
           );
         },
@@ -531,21 +661,27 @@ const updateDivorce = (req, res) => {
   });
 };
 
+// =====================================================
+// APPROVE DIVORCE
+// =====================================================
+
 const approveDivorce = (req, res) => {
   const { id } = req.params;
-  const divorceId = Number(id);
 
-  if (!Number.isInteger(divorceId) || divorceId <= 0) {
+  if (!isPositiveInteger(id)) {
     return res.status(400).json({
-      message: "Invalid divorce ID",
+      message: "Divorce ID must be a positive integer",
     });
   }
+
+  const divorceId = Number(id);
 
   const sql = `
     UPDATE vital_records vr
     INNER JOIN divorces d
       ON d.record_id = vr.record_id
-    SET vr.status = 'Active'
+    SET vr.status = 'Active',
+        vr.cancel_reason = NULL
     WHERE d.divorce_id = ?
       AND vr.record_type = 'Divorce'
       AND vr.status = 'Pending'
@@ -553,11 +689,11 @@ const approveDivorce = (req, res) => {
 
   connection.query(sql, [divorceId], (error, result) => {
     if (error) {
-      console.error("Approve divorce error:", error);
-
-      return res.status(500).json({
-        message: "Failed to approve divorce record",
-      });
+      return handleDatabaseError(
+        error,
+        res,
+        "Failed to approve divorce record",
+      );
     }
 
     if (result.affectedRows === 0) {
@@ -572,11 +708,11 @@ const approveDivorce = (req, res) => {
 
       return connection.query(checkSql, [divorceId], (checkError, rows) => {
         if (checkError) {
-          console.error("Check divorce status error:", checkError);
-
-          return res.status(500).json({
-            message: "Failed to check divorce record",
-          });
+          return handleDatabaseError(
+            checkError,
+            res,
+            "Failed to check divorce status",
+          );
         }
 
         if (rows.length === 0) {
@@ -600,15 +736,17 @@ const approveDivorce = (req, res) => {
   });
 };
 
+// =====================================================
+// CANCEL DIVORCE
+// =====================================================
+
 const cancelDivorce = (req, res) => {
   const { id } = req.params;
-  const { cancel_reason } = req.body;
+  const { cancel_reason } = req.body || {};
 
-  const divorceId = Number(id);
-
-  if (!Number.isInteger(divorceId) || divorceId <= 0) {
+  if (!isPositiveInteger(id)) {
     return res.status(400).json({
-      message: "Invalid divorce ID",
+      message: "Divorce ID must be a positive integer",
     });
   }
 
@@ -617,6 +755,14 @@ const cancelDivorce = (req, res) => {
       message: "Cancellation reason is required",
     });
   }
+
+  if (cancel_reason.trim().length > 500) {
+    return res.status(400).json({
+      message: "Cancellation reason cannot exceed 500 characters",
+    });
+  }
+
+  const divorceId = Number(id);
 
   const sql = `
     UPDATE vital_records vr
@@ -631,11 +777,7 @@ const cancelDivorce = (req, res) => {
 
   connection.query(sql, [cancel_reason.trim(), divorceId], (error, result) => {
     if (error) {
-      console.error("Cancel divorce error:", error);
-
-      return res.status(500).json({
-        message: "Failed to cancel divorce record",
-      });
+      return handleDatabaseError(error, res, "Failed to cancel divorce record");
     }
 
     if (result.affectedRows === 0) {
@@ -650,9 +792,11 @@ const cancelDivorce = (req, res) => {
 
       return connection.query(checkSql, [divorceId], (checkError, rows) => {
         if (checkError) {
-          return res.status(500).json({
-            message: "Failed to check divorce record",
-          });
+          return handleDatabaseError(
+            checkError,
+            res,
+            "Failed to check divorce record",
+          );
         }
 
         if (rows.length === 0) {
@@ -676,6 +820,10 @@ const cancelDivorce = (req, res) => {
     });
   });
 };
+
+// =====================================================
+// EXPORT CONTROLLERS
+// =====================================================
 
 module.exports = {
   createDivorce,
