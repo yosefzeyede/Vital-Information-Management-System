@@ -1,5 +1,93 @@
 const connection = require("../config/db");
 
+// ==================== HELPER FUNCTIONS ====================
+
+const isPositiveInteger = (value) => {
+  if (
+    value === undefined ||
+    value === null ||
+    (typeof value === "string" && value.trim() === "")
+  ) {
+    return false;
+  }
+
+  const number = Number(value);
+
+  return Number.isSafeInteger(number) && number > 0;
+};
+
+const isValidDate = (value) => {
+  if (typeof value !== "string") return false;
+
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+
+  if (!match) return false;
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+
+  if (year < 1000 || year > 9999) return false;
+
+  const date = new Date(Date.UTC(year, month - 1, day));
+
+  return (
+    date.getUTCFullYear() === year &&
+    date.getUTCMonth() === month - 1 &&
+    date.getUTCDate() === day
+  );
+};
+
+const isValidCertificateNumber = (value) =>
+  typeof value === "string" &&
+  value.trim().length >= 1 &&
+  value.trim().length <= 100;
+
+const handleDatabaseError = (res, error, action) => {
+  console.error(`${action} error:`, error);
+
+  if (error.code === "ER_DUP_ENTRY") {
+    return res.status(409).json({
+      message: "Certificate number already exists",
+    });
+  }
+
+  if (
+    error.code === "ER_NO_REFERENCED_ROW_2" ||
+    error.code === "ER_NO_REFERENCED_ROW"
+  ) {
+    return res.status(400).json({
+      message: "Invalid record_id or issued_by",
+    });
+  }
+
+  return res.status(500).json({
+    message: `${action} failed`,
+  });
+};
+
+// Shared query for certificate details.
+// Note: certificates table has no cancel_reason column.
+const certificateSelectSql = `
+  SELECT
+    c.certificate_id,
+    c.record_id,
+    c.certificate_number,
+    c.issued_date,
+    c.issued_by,
+    u.username AS issued_by_username,
+    c.status,
+    vr.record_type,
+    vr.status AS record_status
+  FROM certificates c
+  INNER JOIN users u
+    ON c.issued_by = u.user_id
+  INNER JOIN vital_records vr
+    ON c.record_id = vr.record_id
+`;
+
+// ==================== CREATE CERTIFICATE ====================
+
 const createCertificate = (req, res) => {
   const { record_id, certificate_number, issued_date, issued_by } = req.body;
 
@@ -7,8 +95,9 @@ const createCertificate = (req, res) => {
     record_id === undefined ||
     record_id === null ||
     record_id === "" ||
-    !certificate_number ||
-    !issued_date ||
+    certificate_number === undefined ||
+    issued_date === undefined ||
+    issued_date === "" ||
     issued_by === undefined ||
     issued_by === null ||
     issued_by === ""
@@ -19,36 +108,17 @@ const createCertificate = (req, res) => {
     });
   }
 
-  const isPositiveInteger = (value) =>
-    Number.isInteger(Number(value)) && Number(value) > 0;
-
   if (!isPositiveInteger(record_id) || !isPositiveInteger(issued_by)) {
     return res.status(400).json({
       message: "record_id and issued_by must be positive integers",
     });
   }
 
-  if (
-    typeof certificate_number !== "string" ||
-    certificate_number.trim() === "" ||
-    certificate_number.trim().length > 100
-  ) {
+  if (!isValidCertificateNumber(certificate_number)) {
     return res.status(400).json({
       message: "Certificate number must be 1–100 characters",
     });
   }
-
-  const isValidDate = (value) => {
-    if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
-      return false;
-    }
-
-    const date = new Date(`${value}T00:00:00Z`);
-
-    return (
-      !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value
-    );
-  };
 
   if (!isValidDate(issued_date)) {
     return res.status(400).json({
@@ -56,20 +126,16 @@ const createCertificate = (req, res) => {
     });
   }
 
-  const sql = `
+  const checkRecordSql = `
     SELECT record_id, status
     FROM vital_records
     WHERE record_id = ?
     LIMIT 1
   `;
 
-  connection.query(sql, [Number(record_id)], (error, records) => {
+  connection.query(checkRecordSql, [Number(record_id)], (error, records) => {
     if (error) {
-      console.error("Check vital record error:", error);
-
-      return res.status(500).json({
-        message: "Failed to check vital record",
-      });
+      return handleDatabaseError(res, error, "Check vital record");
     }
 
     if (records.length === 0) {
@@ -85,85 +151,52 @@ const createCertificate = (req, res) => {
     }
 
     const insertSql = `
-      INSERT INTO certificates (
-        record_id,
-        certificate_number,
+        INSERT INTO certificates (
+          record_id,
+          certificate_number,
+          issued_date,
+          issued_by,
+          status
+        )
+        VALUES (?, ?, ?, ?, 'Active')
+      `;
+
+    const values = [
+      Number(record_id),
+      certificate_number.trim(),
+      issued_date,
+      Number(issued_by),
+    ];
+
+    connection.query(insertSql, values, (insertError, result) => {
+      if (insertError) {
+        return handleDatabaseError(res, insertError, "Create certificate");
+      }
+
+      return res.status(201).json({
+        message: "Certificate created successfully",
+        certificate_id: result.insertId,
+        record_id: Number(record_id),
+        certificate_number: certificate_number.trim(),
         issued_date,
-        issued_by,
-        status
-      )
-      VALUES (?, ?, ?, ?, 'Active')
-    `;
-
-    connection.query(
-      insertSql,
-      [
-        Number(record_id),
-        certificate_number.trim(),
-        issued_date,
-        Number(issued_by),
-      ],
-      (insertError, result) => {
-        if (insertError) {
-          console.error("Create certificate error:", insertError);
-
-          if (insertError.code === "ER_DUP_ENTRY") {
-            return res.status(409).json({
-              message: "Certificate number already exists",
-            });
-          }
-
-          if (insertError.code === "ER_NO_REFERENCED_ROW_2") {
-            return res.status(400).json({
-              message: "Invalid record_id or issued_by",
-            });
-          }
-
-          return res.status(500).json({
-            message: "Failed to create certificate",
-          });
-        }
-
-        return res.status(201).json({
-          message: "Certificate created successfully",
-          certificate_id: result.insertId,
-          record_id: Number(record_id),
-          certificate_number: certificate_number.trim(),
-          status: "Active",
-        });
-      },
-    );
+        issued_by: Number(issued_by),
+        status: "Active",
+      });
+    });
   });
 };
 
+// ==================== GET ALL CERTIFICATES ====================
+
 const getAllCertificates = (req, res) => {
   const sql = `
-    SELECT
-      c.certificate_id,
-      c.record_id,
-      c.certificate_number,
-      c.issued_date,
-      c.issued_by,
-      u.username AS issued_by_username,
-      c.status,
-      c.cancel_reason,
-      vr.record_type,
-      vr.status AS record_status
-    FROM certificates c
-    JOIN users u
-      ON c.issued_by = u.user_id
-    JOIN vital_records vr
-      ON c.record_id = vr.record_id
+    ${certificateSelectSql}
     ORDER BY c.certificate_id DESC
   `;
 
   connection.query(sql, (error, results) => {
     if (error) {
-      console.error("Get certificates error:", error);
-
-      return res.status(500).json({
-        message: "Failed to retrieve certificates",
-      });
+      return handleDatabaseError(res, error, "Retrieve certificates");
     }
 
     return res.status(200).json({
@@ -174,44 +207,26 @@ const getAllCertificates = (req, res) => {
   });
 };
 
+// ==================== GET CERTIFICATE BY ID ====================
+
 const getCertificateById = (req, res) => {
   const { id } = req.params;
 
-  // Validate certificate ID
-  if (!/^[1-9]\d*$/.test(id)) {
+  if (!isPositiveInteger(id)) {
     return res.status(400).json({
       message: "Certificate ID must be a positive integer",
     });
   }
 
   const sql = `
-    SELECT
-      c.certificate_id,
-      c.record_id,
-      c.certificate_number,
-      c.issued_date,
-      c.issued_by,
-      u.username AS issued_by_username,
-      c.status,
-      c.cancel_reason,
-      vr.record_type,
-      vr.status AS record_status
-    FROM certificates c
-    JOIN users u
-      ON c.issued_by = u.user_id
-    JOIN vital_records vr
-      ON c.record_id = vr.record_id
+    ${certificateSelectSql}
     WHERE c.certificate_id = ?
     LIMIT 1
   `;
 
   connection.query(sql, [Number(id)], (error, results) => {
     if (error) {
-      console.error("Get certificate by ID error:", error);
-
-      return res.status(500).json({
-        message: "Failed to retrieve certificate",
-      });
+      return handleDatabaseError(res, error, "Retrieve certificate");
     }
 
     if (results.length === 0) {
@@ -227,47 +242,33 @@ const getCertificateById = (req, res) => {
   });
 };
 
+// ==================== UPDATE CERTIFICATE ====================
+
 const updateCertificate = (req, res) => {
   const { id } = req.params;
   const { certificate_number, issued_date } = req.body;
 
-  // Validate certificate ID
-  if (!/^[1-9]\d*$/.test(id)) {
+  if (!isPositiveInteger(id)) {
     return res.status(400).json({
       message: "Certificate ID must be a positive integer",
     });
   }
 
-  // Validate required fields
-  if (!certificate_number || !issued_date) {
+  if (
+    certificate_number === undefined ||
+    issued_date === undefined ||
+    issued_date === ""
+  ) {
     return res.status(400).json({
       message: "certificate_number and issued_date are required",
     });
   }
 
-  // Validate certificate number
-  if (
-    typeof certificate_number !== "string" ||
-    certificate_number.trim() === "" ||
-    certificate_number.trim().length > 100
-  ) {
+  if (!isValidCertificateNumber(certificate_number)) {
     return res.status(400).json({
       message: "Certificate number must be 1–100 characters",
     });
   }
-
-  // Validate date format and actual date
-  const isValidDate = (value) => {
-    if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
-      return false;
-    }
-
-    const date = new Date(`${value}T00:00:00Z`);
-
-    return (
-      !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value
-    );
-  };
 
   if (!isValidDate(issued_date)) {
     return res.status(400).json({
@@ -275,7 +276,6 @@ const updateCertificate = (req, res) => {
     });
   }
 
-  // Check whether certificate exists
   const checkSql = `
     SELECT certificate_id, status
     FROM certificates
@@ -285,11 +285,7 @@ const updateCertificate = (req, res) => {
 
   connection.query(checkSql, [Number(id)], (error, results) => {
     if (error) {
-      console.error("Check certificate error:", error);
-
-      return res.status(500).json({
-        message: "Failed to check certificate",
-      });
+      return handleDatabaseError(res, error, "Check certificate");
     }
 
     if (results.length === 0) {
@@ -304,12 +300,12 @@ const updateCertificate = (req, res) => {
       });
     }
 
-    // Update certificate
     const updateSql = `
       UPDATE certificates
       SET certificate_number = ?,
           issued_date = ?
       WHERE certificate_id = ?
+        AND status = 'Active'
     `;
 
     connection.query(
@@ -317,16 +313,12 @@ const updateCertificate = (req, res) => {
       [certificate_number.trim(), issued_date, Number(id)],
       (updateError, updateResult) => {
         if (updateError) {
-          console.error("Update certificate error:", updateError);
+          return handleDatabaseError(res, updateError, "Update certificate");
+        }
 
-          if (updateError.code === "ER_DUP_ENTRY") {
-            return res.status(409).json({
-              message: "Certificate number already exists",
-            });
-          }
-
-          return res.status(500).json({
-            message: "Failed to update certificate",
+        if (updateResult.affectedRows === 0) {
+          return res.status(409).json({
+            message: "Certificate was not updated; it may have been cancelled",
           });
         }
 
@@ -341,23 +333,14 @@ const updateCertificate = (req, res) => {
   });
 };
 
+// ==================== CANCEL CERTIFICATE ====================
+
 const cancelCertificate = (req, res) => {
   const { id } = req.params;
-  const { reason } = req.body;
 
-  if (!/^[1-9]\d*$/.test(id)) {
+  if (!isPositiveInteger(id)) {
     return res.status(400).json({
       message: "Certificate ID must be a positive integer",
-    });
-  }
-
-  if (
-    typeof reason !== "string" ||
-    reason.trim() === "" ||
-    reason.trim().length > 500
-  ) {
-    return res.status(400).json({
-      message: "A cancellation reason (1–500 characters) is required",
     });
   }
 
@@ -370,11 +353,7 @@ const cancelCertificate = (req, res) => {
 
   connection.query(checkSql, [Number(id)], (error, results) => {
     if (error) {
-      console.error("Check certificate error:", error);
-
-      return res.status(500).json({
-        message: "Failed to check certificate",
-      });
+      return handleDatabaseError(res, error, "Check certificate");
     }
 
     if (results.length === 0) {
@@ -391,17 +370,19 @@ const cancelCertificate = (req, res) => {
 
     const updateSql = `
       UPDATE certificates
-      SET status = 'Cancelled',
-          cancel_reason = ?
+      SET status = 'Cancelled'
       WHERE certificate_id = ?
+        AND status = 'Active'
     `;
 
-    connection.query(updateSql, [reason.trim(), Number(id)], (updateError) => {
+    connection.query(updateSql, [Number(id)], (updateError, result) => {
       if (updateError) {
-        console.error("Cancel certificate error:", updateError);
+        return handleDatabaseError(res, updateError, "Cancel certificate");
+      }
 
-        return res.status(500).json({
-          message: "Failed to cancel certificate",
+      if (result.affectedRows === 0) {
+        return res.status(409).json({
+          message: "Certificate could not be cancelled",
         });
       }
 
@@ -409,11 +390,12 @@ const cancelCertificate = (req, res) => {
         message: "Certificate cancelled successfully",
         certificate_id: Number(id),
         status: "Cancelled",
-        cancel_reason: reason.trim(),
       });
     });
   });
 };
+
+// ==================== EXPORT FUNCTIONS ====================
 
 module.exports = {
   createCertificate,
