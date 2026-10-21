@@ -13,6 +13,7 @@ const marriageRoutes = require("./routes/marriageRoutes.js");
 const divorceRoutes = require("./routes/divorceRoutes.js");
 const adoptionRoutes = require("./routes/adoptionRoutes.js");
 const certificateRoutes = require("./routes/certificateRoutes");
+const dashboardRoutes = require("./routes/dashboardRoutes");
 
 const app = express();
 
@@ -37,6 +38,7 @@ app.use("/api/marriages", marriageRoutes);
 app.use("/api/divorces", divorceRoutes);
 app.use("/api/adoptions", adoptionRoutes);
 app.use("/api/certificates", certificateRoutes);
+app.use("/api/dashboard", dashboardRoutes);
 // Server
 const PORT = process.env.PORT || 4000;
 
