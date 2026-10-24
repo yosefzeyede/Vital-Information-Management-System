@@ -8,13 +8,11 @@ const connection = mysql.createConnection({
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME,
 });
-
 connection.connect((err) => {
   if (err) {
     console.log("Database connection failed:", err.message);
     return;
   }
-
   console.log("MySQL database connected successfully");
 });
 

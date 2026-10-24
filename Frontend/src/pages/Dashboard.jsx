@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import logo from "../Images/yosef.jpg";
+import logo from "../Images/vital_logo.png";
 import {
   LayoutDashboard,
   Users,
@@ -14,7 +14,7 @@ import {
   ClipboardList,
   Clock,
 } from "lucide-react";
-import "./Dashboard.css";
+import "../pagecss/Dashboard.css";
 
 const API_URL = "http://localhost:4000/api";
 
@@ -39,7 +39,7 @@ function Dashboard() {
         });
 
         const data = await response.json();
-
+        console.log(data);
         if (!response.ok) {
           throw new Error(data.message || "Failed to load dashboard");
         }
@@ -122,7 +122,7 @@ function Dashboard() {
             Dashboard
           </button>
 
-          <button className="nav-item">
+          <button onClick={() => navigate("/persons")} className="nav-item">
             <Users size={19} />
             Persons
           </button>

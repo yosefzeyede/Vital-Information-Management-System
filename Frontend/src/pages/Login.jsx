@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Landmark, Eye, EyeOff, User, Lock } from "lucide-react";
-import "./Login.css";
+import "../pagecss/Login.css";
 
 function Login() {
   const [username, setUsername] = useState("");
@@ -50,13 +50,13 @@ function Login() {
       localStorage.setItem(
         "user",
         JSON.stringify({
-          user_id: data.user_id,
-          username: data.username,
-          role: data.role,
+          user_id: data.user.user_id,
+          username: data.user.username,
+          role: data.user.role,
         }),
       );
 
-      navigate("/dashboard");
+      navigate("/dashboard", { replace: true });
     } catch (err) {
       setError(
         err.message === "Failed to fetch"
@@ -119,6 +119,7 @@ function Login() {
               type="button"
               onClick={() => setShowPassword(!showPassword)}
               aria-label={showPassword ? "Hide password" : "Show password"}
+              title={showPassword ? "Hide password" : "Show password"}
             >
               {showPassword ? <EyeOff size={19} /> : <Eye size={19} />}
             </button>
