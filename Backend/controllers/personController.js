@@ -1,12 +1,12 @@
 const connection = require("../config/db");
 
 // ==========================================
-// REUSABLE VALIDATION HELPERS
+// VALIDATION HELPERS
 // ==========================================
 
-// Validate positive integer IDs
 const isValidId = (id) => {
   const value = Number(id);
+
   return (
     id !== undefined &&
     id !== null &&
@@ -16,31 +16,23 @@ const isValidId = (id) => {
   );
 };
 
-// Validate names: English or Unicode letters, spaces,
-// apostrophes, periods, and hyphens are allowed.
-const isValidName = (value) => {
-  return (
-    typeof value === "string" &&
-    value.trim().length >= 1 &&
-    value.trim().length <= 100 &&
-    /^\p{L}[\p{L}\p{M} .'-]*$/u.test(value.trim())
-  );
-};
+const isValidName = (value) =>
+  typeof value === "string" &&
+  value.trim().length >= 1 &&
+  value.trim().length <= 100 &&
+  /^\p{L}[\p{L}\p{M} .'-]*$/u.test(value.trim());
 
-// Validate Ethiopian mobile numbers: 09XXXXXXXX or 07XXXXXXXX
 const isValidPhone = (phone) => {
   if (phone === null || phone === undefined || phone === "") {
-    return true; // Optional field
+    return true;
   }
 
   return typeof phone === "string" && /^(09|07)\d{8}$/.test(phone);
 };
 
-// Validate optional date in strict YYYY-MM-DD format.
-// Future dates are not allowed.
 const isValidBirthDate = (date) => {
   if (date === null || date === undefined || date === "") {
-    return true; // Optional field
+    return true;
   }
 
   if (typeof date !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
@@ -58,21 +50,9 @@ const isValidBirthDate = (date) => {
     return false;
   }
 
-  // Compare date-only values to avoid timezone problems.
-  const today = new Date().toISOString().slice(0, 10);
-  return date <= today;
+  return date <= new Date().toISOString().slice(0, 10);
 };
 
-// Validate optional location ID
-const isValidLocationId = (id) => {
-  if (id === null || id === undefined || id === "") {
-    return true;
-  }
-
-  return isValidId(id);
-};
-
-// Validate request body fields
 const validatePerson = (body) => {
   const errors = [];
 
@@ -84,79 +64,85 @@ const validatePerson = (body) => {
     date_of_birth,
     phone,
     address,
-    location_id,
   } = body;
 
-  // Required fields
-  const requiredFields = {
-    first_name,
-    middle_name,
-    last_name,
-    gender,
-  };
-
-  for (const [field, value] of Object.entries(requiredFields)) {
-    if (typeof value !== "string" || value.trim() === "") {
-      errors.push(`${field} is required`);
-    }
-  }
-
-  // Validate names only when values are supplied as strings
   for (const [field, value] of Object.entries({
     first_name,
     middle_name,
     last_name,
   })) {
-    if (
-      typeof value === "string" &&
-      value.trim() !== "" &&
-      !isValidName(value)
-    ) {
-      errors.push(
-        `${field} must contain valid letters and may include spaces, hyphens, apostrophes, or periods; maximum 100 characters`,
-      );
+    if (!isValidName(value)) {
+      errors.push(`${field} is required and must be a valid name`);
     }
   }
 
-  // Gender
-  if (
-    typeof gender === "string" &&
-    gender.trim() !== "" &&
-    !["Male", "Female"].includes(gender)
-  ) {
+  if (!["Male", "Female"].includes(gender)) {
     errors.push("gender must be Male or Female");
   }
 
-  // Date of birth
   if (!isValidBirthDate(date_of_birth)) {
     errors.push(
       "date_of_birth must be a valid YYYY-MM-DD date and cannot be in the future",
     );
   }
 
-  // Phone
   if (!isValidPhone(phone)) {
     errors.push(
-      "phone must be a valid 10-digit Ethiopian mobile number starting with 09 or 07",
+      "phone must be a valid 10-digit Ethiopian number starting with 09 or 07",
     );
   }
 
-  // Address
-  if (address !== null && address !== undefined) {
-    if (typeof address !== "string" || address.trim().length > 255) {
-      errors.push("address must be text with a maximum of 255 characters");
-    }
-  }
-
-  // Location ID
-  if (!isValidLocationId(location_id)) {
-    errors.push("location_id must be a positive integer or null");
+  if (
+    address !== null &&
+    address !== undefined &&
+    (typeof address !== "string" || address.trim().length > 255)
+  ) {
+    errors.push("address must be text with a maximum of 255 characters");
   }
 
   return errors;
 };
 
-// Safely handle common database errors
+const validateLocation = (body) => {
+  const errors = [];
+
+  const requiredFields = ["region", "zone", "woreda", "kebele"];
+
+  for (const field of requiredFields) {
+    const value = body[field];
+
+    if (
+      typeof value !== "string" ||
+      value.trim() === "" ||
+      value.trim().length > 100
+    ) {
+      errors.push(`${field} is required and must not exceed 100 characters`);
+    }
+  }
+
+  for (const field of ["city", "got"]) {
+    const value = body[field];
+
+    if (
+      value !== undefined &&
+      value !== null &&
+      (typeof value !== "string" || value.trim().length > 100)
+    ) {
+      errors.push(`${field} must be text with a maximum of 100 characters`);
+    }
+  }
+
+  return errors;
+};
+
+const hasLocationFields = (body) =>
+  ["region", "zone", "city", "woreda", "kebele", "got"].some((field) =>
+    Object.prototype.hasOwnProperty.call(body, field),
+  );
+
+const isValidRequestBody = (body) =>
+  body && typeof body === "object" && !Array.isArray(body);
+
 const handleDatabaseError = (err, res, operation) => {
   console.error(`${operation} error:`, err.code || err.message);
 
@@ -165,7 +151,7 @@ const handleDatabaseError = (err, res, operation) => {
     err.code === "ER_NO_REFERENCED_ROW"
   ) {
     return res.status(400).json({
-      message: "The specified location does not exist",
+      message: "A referenced record does not exist",
     });
   }
 
@@ -181,17 +167,17 @@ const handleDatabaseError = (err, res, operation) => {
 };
 
 // ==========================================
-// CREATE PERSON
+// CREATE PERSON AND LOCATION
 // ==========================================
 
-const createPerson = (req, res) => {
-  if (!req.body || typeof req.body !== "object" || Array.isArray(req.body)) {
+const createPerson = async (req, res) => {
+  if (!isValidRequestBody(req.body)) {
     return res.status(400).json({
       message: "A valid JSON request body is required",
     });
   }
 
-  const errors = validatePerson(req.body);
+  const errors = [...validatePerson(req.body), ...validateLocation(req.body)];
 
   if (errors.length > 0) {
     return res.status(400).json({
@@ -208,66 +194,107 @@ const createPerson = (req, res) => {
     date_of_birth,
     phone,
     address,
-    location_id,
+    region,
+    zone,
+    city,
+    woreda,
+    kebele,
+    got,
   } = req.body;
 
-  const sql = `
-    INSERT INTO persons (
-      first_name,
-      middle_name,
-      last_name,
-      gender,
-      date_of_birth,
-      phone,
-      address,
-      location_id
-    )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `;
+  let db;
 
-  const values = [
-    first_name.trim(),
-    middle_name.trim(),
-    last_name.trim(),
-    gender,
-    date_of_birth || null,
-    phone || null,
-    address?.trim() || null,
-    location_id === "" || location_id === undefined ? null : location_id,
-  ];
+  try {
+    // Get a dedicated connection for the transaction.
+    db = await connection.promise().getConnection();
 
-  connection.query(sql, values, (err, result) => {
-    if (err) {
-      return handleDatabaseError(err, res, "register person");
-    }
+    await db.beginTransaction();
+
+    // 1. Insert the person's location.
+    const [locationResult] = await db.execute(
+      `INSERT INTO locations
+       (region, zone, city, woreda, kebele, got)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [
+        region.trim(),
+        zone.trim(),
+        city?.trim() || null,
+        woreda.trim(),
+        kebele.trim(),
+        got?.trim() || null,
+      ],
+    );
+
+    const locationId = locationResult.insertId;
+
+    // 2. Insert the person using the new location_id.
+    const [personResult] = await db.execute(
+      `INSERT INTO persons
+       (first_name, middle_name, last_name, gender,
+        date_of_birth, phone, address, location_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        first_name.trim(),
+        middle_name.trim(),
+        last_name.trim(),
+        gender,
+        date_of_birth || null,
+        phone || null,
+        address?.trim() || null,
+        locationId,
+      ],
+    );
+
+    // Both inserts succeeded.
+    await db.commit();
 
     return res.status(201).json({
-      message: "Person registered successfully",
-      person_id: result.insertId,
+      message: "Person and location registered successfully",
+      person_id: personResult.insertId,
+      location_id: locationId,
     });
-  });
+  } catch (err) {
+    if (db) {
+      try {
+        await db.rollback();
+      } catch (rollbackError) {
+        console.error("Transaction rollback failed:", rollbackError.message);
+      }
+    }
+
+    return handleDatabaseError(err, res, "register person and location");
+  } finally {
+    if (db) db.release();
+  }
 };
 
 // ==========================================
-// GET ALL PERSONS
+// GET ALL PERSONS WITH THEIR LOCATIONS
 // ==========================================
 
 const getPersons = (req, res) => {
   const sql = `
     SELECT
-      person_id,
-      first_name,
-      middle_name,
-      last_name,
-      gender,
-      date_of_birth,
-      phone,
-      address,
-      location_id,
-      created_at,
-      updated_at
-    FROM persons
-    ORDER BY person_id DESC
+      p.person_id,
+      p.first_name,
+      p.middle_name,
+      p.last_name,
+      p.gender,
+      p.date_of_birth,
+      p.phone,
+      p.address,
+      p.location_id,
+      p.created_at,
+      p.updated_at,
+      l.region,
+      l.zone,
+      l.city,
+      l.woreda,
+      l.kebele,
+      l.got
+    FROM persons p
+    LEFT JOIN locations l ON p.location_id = l.location_id
+    ORDER BY p.person_id DESC
   `;
 
   connection.query(sql, (err, results) => {
@@ -298,19 +325,26 @@ const getPersonById = (req, res) => {
 
   const sql = `
     SELECT
-      person_id,
-      first_name,
-      middle_name,
-      last_name,
-      gender,
-      date_of_birth,
-      phone,
-      address,
-      location_id,
-      created_at,
-      updated_at
-    FROM persons
-    WHERE person_id = ?
+      p.person_id,
+      p.first_name,
+      p.middle_name,
+      p.last_name,
+      p.gender,
+      p.date_of_birth,
+      p.phone,
+      p.address,
+      p.location_id,
+      p.created_at,
+      p.updated_at,
+      l.region,
+      l.zone,
+      l.city,
+      l.woreda,
+      l.kebele,
+      l.got
+    FROM persons p
+    LEFT JOIN locations l ON p.location_id = l.location_id
+    WHERE p.person_id = ?
   `;
 
   connection.query(sql, [Number(id)], (err, results) => {
@@ -332,10 +366,10 @@ const getPersonById = (req, res) => {
 };
 
 // ==========================================
-// UPDATE PERSON
+// UPDATE PERSON AND LOCATION
 // ==========================================
 
-const updatePerson = (req, res) => {
+const updatePerson = async (req, res) => {
   const { id } = req.params;
 
   if (!isValidId(id)) {
@@ -344,13 +378,19 @@ const updatePerson = (req, res) => {
     });
   }
 
-  if (!req.body || typeof req.body !== "object" || Array.isArray(req.body)) {
+  if (!isValidRequestBody(req.body)) {
     return res.status(400).json({
       message: "A valid JSON request body is required",
     });
   }
 
   const errors = validatePerson(req.body);
+
+  if (hasLocationFields(req.body)) {
+    errors.push(...validateLocation(req.body));
+  } else if (!isValidId(req.body.location_id)) {
+    errors.push("A valid location_id or location fields are required");
+  }
 
   if (errors.length > 0) {
     return res.status(400).json({
@@ -367,70 +407,117 @@ const updatePerson = (req, res) => {
     date_of_birth,
     phone,
     address,
+    region,
+    zone,
+    city,
+    woreda,
+    kebele,
+    got,
     location_id,
   } = req.body;
 
-  const sql = `
-    UPDATE persons
-    SET
-      first_name = ?,
-      middle_name = ?,
-      last_name = ?,
-      gender = ?,
-      date_of_birth = ?,
-      phone = ?,
-      address = ?,
-      location_id = ?
-    WHERE person_id = ?
-  `;
+  let db;
 
-  const values = [
-    first_name.trim(),
-    middle_name.trim(),
-    last_name.trim(),
-    gender,
-    date_of_birth || null,
-    phone || null,
-    address?.trim() || null,
-    location_id === "" || location_id === undefined ? null : location_id,
-    Number(id),
-  ];
+  try {
+    db = await connection.promise().getConnection();
+    await db.beginTransaction();
 
-  connection.query(sql, values, (err, result) => {
-    if (err) {
-      return handleDatabaseError(err, res, "update person");
+    // Confirm the person exists.
+    const [existingPersons] = await db.execute(
+      "SELECT person_id FROM persons WHERE person_id = ?",
+      [Number(id)],
+    );
+
+    if (existingPersons.length === 0) {
+      await db.rollback();
+
+      return res.status(404).json({
+        message: "Person not found",
+      });
     }
 
-    // affectedRows may be 0 when the record exists but values are unchanged.
-    if (result.affectedRows === 0) {
-      connection.query(
-        "SELECT person_id FROM persons WHERE person_id = ?",
-        [Number(id)],
-        (checkErr, rows) => {
-          if (checkErr) {
-            return handleDatabaseError(checkErr, res, "verify person");
-          }
+    let finalLocationId = location_id;
 
-          if (rows.length === 0) {
-            return res.status(404).json({
-              message: "Person not found",
-            });
-          }
-
-          return res.status(200).json({
-            message: "Person updated successfully",
-            note: "No values changed",
-          });
-        },
+    if (hasLocationFields(req.body)) {
+      // Create a new location rather than changing a location
+      // that might also be used by other persons.
+      const [locationResult] = await db.execute(
+        `INSERT INTO locations
+         (region, zone, city, woreda, kebele, got)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [
+          region.trim(),
+          zone.trim(),
+          city?.trim() || null,
+          woreda.trim(),
+          kebele.trim(),
+          got?.trim() || null,
+        ],
       );
 
-      return;
+      finalLocationId = locationResult.insertId;
+    } else {
+      // Confirm the selected existing location exists.
+      const [locations] = await db.execute(
+        "SELECT location_id FROM locations WHERE location_id = ?",
+        [Number(location_id)],
+      );
+
+      if (locations.length === 0) {
+        await db.rollback();
+
+        return res.status(400).json({
+          message: "The specified location does not exist",
+        });
+      }
+
+      finalLocationId = Number(location_id);
     }
+
+    const [result] = await db.execute(
+      `UPDATE persons
+       SET first_name = ?,
+           middle_name = ?,
+           last_name = ?,
+           gender = ?,
+           date_of_birth = ?,
+           phone = ?,
+           address = ?,
+           location_id = ?
+       WHERE person_id = ?`,
+      [
+        first_name.trim(),
+        middle_name.trim(),
+        last_name.trim(),
+        gender,
+        date_of_birth || null,
+        phone || null,
+        address?.trim() || null,
+        finalLocationId,
+        Number(id),
+      ],
+    );
+
+    await db.commit();
 
     return res.status(200).json({
       message: "Person updated successfully",
+      location_id: finalLocationId,
+      changed: result.affectedRows > 0,
     });
-  });
+  } catch (err) {
+    if (db) {
+      try {
+        await db.rollback();
+      } catch (rollbackError) {
+        console.error("Transaction rollback failed:", rollbackError.message);
+      }
+    }
+
+    return handleDatabaseError(err, res, "update person");
+  } finally {
+    if (db) db.release();
+  }
 };
 
 // ==========================================
@@ -446,24 +533,83 @@ const deletePerson = (req, res) => {
     });
   }
 
+  connection.query(
+    "DELETE FROM persons WHERE person_id = ?",
+    [Number(id)],
+    (err, result) => {
+      if (err) {
+        return handleDatabaseError(err, res, "delete person");
+      }
+
+      if (result.affectedRows === 0) {
+        return res.status(404).json({
+          message: "Person not found",
+        });
+      }
+
+      return res.status(200).json({
+        message: "Person deleted successfully",
+      });
+    },
+  );
+};
+
+// ==========================================
+// SEARCH PERSON BY NAME OR ID
+// ==========================================
+
+const searchPersons = (req, res) => {
+  const query = String(req.query.query || "").trim();
+
+  if (!query) {
+    return res.status(400).json({
+      message: "Please enter a first name or person ID",
+    });
+  }
+
+  const isNumericId = /^\d+$/.test(query);
+
   const sql = `
-    DELETE FROM persons
-    WHERE person_id = ?
+    SELECT
+      p.person_id,
+      p.first_name,
+      p.middle_name,
+      p.last_name,
+      p.gender,
+      p.date_of_birth,
+      p.phone,
+      p.address,
+      p.location_id,
+      p.created_at,
+      p.updated_at,
+      l.region,
+      l.zone,
+      l.city,
+      l.woreda,
+      l.kebele,
+      l.got
+    FROM persons p
+    LEFT JOIN locations l ON p.location_id = l.location_id
+    WHERE
+      ${isNumericId ? "p.person_id = ? OR" : ""}
+      LOWER(p.first_name) LIKE LOWER(?)
+    ORDER BY p.person_id DESC
+    LIMIT 50
   `;
 
-  connection.query(sql, [Number(id)], (err, result) => {
-    if (err) {
-      return handleDatabaseError(err, res, "delete person");
-    }
+  const searchValue = `%${query}%`;
 
-    if (result.affectedRows === 0) {
-      return res.status(404).json({
-        message: "Person not found",
-      });
+  const params = isNumericId ? [Number(query), searchValue] : [searchValue];
+
+  connection.query(sql, params, (err, results) => {
+    if (err) {
+      return handleDatabaseError(err, res, "search persons");
     }
 
     return res.status(200).json({
-      message: "Person deleted successfully",
+      message: "Person search completed successfully",
+      count: results.length,
+      persons: results,
     });
   });
 };
@@ -478,4 +624,5 @@ module.exports = {
   getPersonById,
   updatePerson,
   deletePerson,
+  searchPersons,
 };

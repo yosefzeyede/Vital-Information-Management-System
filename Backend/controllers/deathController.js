@@ -1,150 +1,78 @@
 const connection = require("../config/db");
 
-// ==================== HELPER FUNCTIONS ====================
+// Get Promise-based pool
+const pool = connection.promise();
 
-// Validate positive integer IDs
-const isPositiveInteger = (value) => {
-  if (
-    value === null ||
-    value === undefined ||
-    (typeof value === "string" && value.trim() === "")
-  ) {
-    return false;
-  }
+// =========================
+// Helper Functions
+// =========================
 
-  const number = Number(value);
+const isPositiveInteger = (value) =>
+  Number.isInteger(Number(value)) && Number(value) > 0;
 
-  return Number.isSafeInteger(number) && number > 0;
-};
-
-// Validate a real date in YYYY-MM-DD format
 const isValidDate = (value) => {
-  if (typeof value !== "string") return false;
+  if (!value || typeof value !== "string") return false;
 
-  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
 
-  if (!match) return false;
-
-  const year = Number(match[1]);
-  const month = Number(match[2]);
-  const day = Number(match[3]);
-
-  if (year < 1000 || year > 9999) return false;
-
-  const date = new Date(Date.UTC(year, month - 1, day));
-
+  const date = new Date(`${value}T00:00:00`);
   return (
-    date.getUTCFullYear() === year &&
-    date.getUTCMonth() === month - 1 &&
-    date.getUTCDate() === day
+    !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value
   );
 };
 
-// Get today's date in local YYYY-MM-DD format
-const getToday = () => {
-  const now = new Date();
+const getToday = () => new Date().toISOString().slice(0, 10);
 
-  const year = now.getFullYear();
-  const month = String(now.getMonth() + 1).padStart(2, "0");
-  const day = String(now.getDate()).padStart(2, "0");
-
-  return `${year}-${month}-${day}`;
-};
-
-// Validate optional foreign key IDs
 const isValidOptionalId = (value) =>
-  value === null || value === undefined || isPositiveInteger(value);
+  value === null ||
+  value === undefined ||
+  value === "" ||
+  isPositiveInteger(value);
 
-// Roll back transaction safely
-const rollback = (res, statusCode, message) => {
-  connection.rollback((error) => {
-    if (error) {
-      console.error("Transaction rollback error:", error);
+const validateCause = (cause) =>
+  cause === null ||
+  cause === undefined ||
+  cause === "" ||
+  (typeof cause === "string" && cause.trim().length <= 255);
+
+// Check that referenced records exist.
+// These queries use the same transaction connection.
+const validateReferences = async (conn, personId, locationId, registeredBy) => {
+  const [persons] = await conn.query(
+    "SELECT person_id FROM persons WHERE person_id = ?",
+    [personId],
+  );
+
+  if (persons.length === 0) {
+    throw new Error("The selected person does not exist.");
+  }
+
+  if (locationId !== null) {
+    const [locations] = await conn.query(
+      "SELECT location_id FROM locations WHERE location_id = ?",
+      [locationId],
+    );
+
+    if (locations.length === 0) {
+      throw new Error("The selected location does not exist.");
     }
+  }
 
-    if (!res.headersSent) {
-      return res.status(statusCode).json({ message });
-    }
-  });
+  const [users] = await conn.query(
+    "SELECT user_id FROM users WHERE user_id = ?",
+    [registeredBy],
+  );
+
+  if (users.length === 0) {
+    throw new Error("The selected registered user does not exist.");
+  }
 };
 
-// Check whether a referenced record exists
-const checkExists = (table, column, value, callback) => {
-  // These table and column names are internal constants,
-  // not values supplied by the client.
-  const sql = `SELECT 1 FROM ${table} WHERE ${column} = ? LIMIT 1`;
+// =========================
+// CREATE DEATH RECORD
+// =========================
 
-  connection.query(sql, [value], (error, results) => {
-    if (error) return callback(error);
-
-    callback(null, results.length > 0);
-  });
-};
-
-// Validate references used by a death record
-const validateReferences = (personId, locationId, registeredBy, callback) => {
-  checkExists("persons", "person_id", personId, (error, personExists) => {
-    if (error) return callback(error);
-
-    if (!personExists) {
-      return callback(null, {
-        status: 404,
-        message: "Person not found",
-      });
-    }
-
-    const checkLocation = (next) => {
-      if (locationId == null) return next(null, null);
-
-      checkExists(
-        "locations",
-        "location_id",
-        locationId,
-        (locationError, locationExists) => {
-          if (locationError) return next(locationError);
-
-          if (!locationExists) {
-            return next(null, {
-              status: 404,
-              message: "Location not found",
-            });
-          }
-
-          next(null, null);
-        },
-      );
-    };
-
-    checkLocation((locationError, locationProblem) => {
-      if (locationError) return callback(locationError);
-      if (locationProblem) return callback(null, locationProblem);
-
-      checkExists("users", "user_id", registeredBy, (userError, userExists) => {
-        if (userError) return callback(userError);
-
-        if (!userExists) {
-          return callback(null, {
-            status: 404,
-            message: "Registered-by user not found",
-          });
-        }
-
-        callback(null, null);
-      });
-    });
-  });
-};
-
-// Validate optional cause of death
-const validateCause = (cause) => {
-  if (cause == null) return true;
-
-  return typeof cause === "string" && cause.trim().length <= 255;
-};
-
-// ==================== CREATE DEATH ====================
-
-const createDeath = (req, res) => {
+const createDeath = async (req, res) => {
   const {
     person_id,
     location_id,
@@ -154,18 +82,11 @@ const createDeath = (req, res) => {
     cause_of_death,
   } = req.body;
 
-  // Required fields
-  if (
-    person_id == null ||
-    registration_date == null ||
-    registered_by == null ||
-    death_date == null ||
-    registration_date === "" ||
-    death_date === ""
-  ) {
+  // Validate required fields
+  if (!person_id || !registration_date || !registered_by || !death_date) {
     return res.status(400).json({
       message:
-        "person_id, registration_date, registered_by, and death_date are required",
+        "Person ID, registration date, registered by, and death date are required.",
     });
   }
 
@@ -176,251 +97,235 @@ const createDeath = (req, res) => {
     !isValidOptionalId(location_id)
   ) {
     return res.status(400).json({
-      message:
-        "person_id and registered_by must be positive integers; location_id must be a positive integer or null",
+      message: "Invalid person, location, or registered user ID.",
     });
   }
 
   // Validate dates
-  if (!isValidDate(registration_date) || !isValidDate(death_date)) {
+  if (!isValidDate(death_date) || !isValidDate(registration_date)) {
     return res.status(400).json({
-      message: "Dates must be valid dates in YYYY-MM-DD format",
+      message: "Dates must be valid and use YYYY-MM-DD format.",
     });
   }
 
   if (death_date > getToday()) {
     return res.status(400).json({
-      message: "death_date cannot be in the future",
+      message: "Death date cannot be in the future.",
     });
   }
 
-  // A death should not be registered before it occurred
   if (registration_date < death_date) {
     return res.status(400).json({
-      message: "registration_date cannot be earlier than death_date",
+      message: "Registration date cannot be before death date.",
     });
   }
 
   if (!validateCause(cause_of_death)) {
     return res.status(400).json({
-      message: "cause_of_death must be a string not exceeding 255 characters",
+      message: "Cause of death must not exceed 255 characters.",
     });
   }
 
-  // Check foreign key references before starting the transaction
-  validateReferences(
-    Number(person_id),
-    location_id == null ? null : Number(location_id),
-    Number(registered_by),
-    (validationError, problem) => {
-      if (validationError) {
-        console.error("Death reference validation error:", validationError);
+  let conn;
 
-        return res.status(500).json({
-          message: "Failed to validate death record references",
-        });
-      }
+  try {
+    // Get a dedicated connection from the pool
+    conn = await pool.getConnection();
 
-      if (problem) {
-        return res.status(problem.status).json({
-          message: problem.message,
-        });
-      }
+    // Start transaction
+    await conn.beginTransaction();
 
-      connection.beginTransaction((transactionError) => {
-        if (transactionError) {
-          console.error("Begin death transaction error:", transactionError);
+    const personId = Number(person_id);
+    const registeredBy = Number(registered_by);
+    const locationId =
+      location_id === "" || location_id === undefined || location_id === null
+        ? null
+        : Number(location_id);
 
-          return res.status(500).json({
-            message: "Failed to start transaction",
-          });
-        }
+    // Validate foreign key references using this connection
+    await validateReferences(conn, personId, locationId, registeredBy);
 
-        const recordSql = `
-          INSERT INTO vital_records (
-            person_id,
-            location_id,
-            record_type,
-            registration_date,
-            registered_by,
-            status
-          )
-          VALUES (?, ?, 'Death', ?, ?, 'Pending')
-        `;
+    // Insert into vital_records
+    const [recordResult] = await conn.query(
+      `INSERT INTO vital_records
+        (record_type, person_id, location_id, registration_date, registered_by, status)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [
+        "Death",
+        personId,
+        locationId,
+        registration_date,
+        registeredBy,
+        "Pending",
+      ],
+    );
 
-        const recordValues = [
-          Number(person_id),
-          location_id == null ? null : Number(location_id),
-          registration_date,
-          Number(registered_by),
-        ];
+    const recordId = recordResult.insertId;
 
-        connection.query(
-          recordSql,
-          recordValues,
-          (recordError, recordResult) => {
-            if (recordError) {
-              console.error("Create vital record error:", recordError);
+    // Insert into deaths
+    const [deathResult] = await conn.query(
+      `INSERT INTO deaths
+        (record_id, death_date, cause_of_death)
+       VALUES (?, ?, ?)`,
+      [recordId, death_date, cause_of_death ? cause_of_death.trim() : null],
+    );
 
-              return rollback(res, 500, "Failed to create vital record");
-            }
+    // Commit transaction
+    await conn.commit();
 
-            const recordId = recordResult.insertId;
+    return res.status(201).json({
+      message: "Death record created successfully.",
+      record_id: recordId,
+      death_id: deathResult.insertId,
+      status: "Pending",
+    });
+  } catch (error) {
+    if (conn) {
+      await conn.rollback();
+    }
 
-            const deathSql = `
-              INSERT INTO deaths (
-                record_id,
-                death_date,
-                cause_of_death
-              )
-              VALUES (?, ?, ?)
-            `;
+    console.error("Create Death Error:", error);
 
-            connection.query(
-              deathSql,
-              [
-                recordId,
-                death_date,
-                cause_of_death == null ? null : cause_of_death.trim() || null,
-              ],
-              (deathError, deathResult) => {
-                if (deathError) {
-                  console.error("Create death details error:", deathError);
+    if (
+      error.message === "The selected person does not exist." ||
+      error.message === "The selected location does not exist." ||
+      error.message === "The selected registered user does not exist."
+    ) {
+      return res.status(400).json({ message: error.message });
+    }
 
-                  return rollback(res, 500, "Failed to save death details");
-                }
-
-                connection.commit((commitError) => {
-                  if (commitError) {
-                    console.error("Death commit error:", commitError);
-
-                    return rollback(res, 500, "Failed to save death record");
-                  }
-
-                  return res.status(201).json({
-                    message: "Death record created successfully",
-                    record_id: recordId,
-                    death_id: deathResult.insertId,
-                    status: "Pending",
-                  });
-                });
-              },
-            );
-          },
-        );
-      });
-    },
-  );
+    return res.status(500).json({
+      message: "Failed to create death record.",
+      error: error.message,
+    });
+  } finally {
+    if (conn) {
+      conn.release();
+    }
+  }
 };
 
-// ==================== GET ALL DEATHS ====================
+// =========================
+// GET ALL DEATH RECORDS
+// =========================
 
-const getDeaths = (req, res) => {
-  const sql = `
-    SELECT
-      d.death_id,
-      vr.record_id,
-      vr.person_id,
-      p.first_name,
-      p.middle_name,
-      p.last_name,
-      p.gender,
-      p.date_of_birth,
-      d.death_date,
-      d.cause_of_death,
-      vr.location_id,
-      vr.registration_date,
-      vr.registered_by,
-      vr.status,
-      vr.cancel_reason,
-      vr.created_at,
-      vr.updated_at
-    FROM deaths d
-    INNER JOIN vital_records vr
-      ON d.record_id = vr.record_id
-    INNER JOIN persons p
-      ON vr.person_id = p.person_id
-    WHERE vr.record_type = 'Death'
-    ORDER BY d.death_id DESC
-  `;
-
-  connection.query(sql, (error, results) => {
-    if (error) {
-      console.error("Get deaths error:", error);
-
-      return res.status(500).json({
-        message: "Failed to retrieve death records",
-      });
-    }
+const getDeaths = async (req, res) => {
+  try {
+    const [results] = await pool.query(
+      `SELECT
+          d.death_id,
+          vr.record_id,
+          vr.person_id,
+          p.first_name,
+          p.middle_name,
+          p.last_name,
+          p.gender,
+          p.date_of_birth,
+          d.death_date,
+          d.cause_of_death,
+          vr.location_id,
+          vr.registration_date,
+          vr.registered_by,
+          vr.status,
+          vr.cancel_reason,
+          vr.created_at,
+          vr.updated_at,
+          l.region,
+          l.zone,
+          l.city,
+          l.woreda,
+          l.kebele,
+          l.got
+       FROM deaths d
+       INNER JOIN vital_records vr ON d.record_id = vr.record_id
+       INNER JOIN persons p ON vr.person_id = p.person_id
+       LEFT JOIN locations l ON vr.location_id = l.location_id
+       ORDER BY d.death_id DESC`,
+    );
 
     return res.status(200).json({
       count: results.length,
       deaths: results,
     });
-  });
+  } catch (error) {
+    console.error("Get Deaths Error:", error);
+
+    return res.status(500).json({
+      message: "Failed to retrieve death records.",
+      error: error.message,
+    });
+  }
 };
 
-// ==================== GET DEATH BY ID ====================
+// =========================
+// GET DEATH RECORD BY ID
+// =========================
 
-const getDeathById = (req, res) => {
+const getDeathById = async (req, res) => {
   const { id } = req.params;
 
   if (!isPositiveInteger(id)) {
     return res.status(400).json({
-      message: "Invalid death ID",
+      message: "Invalid death ID.",
     });
   }
 
-  const sql = `
-    SELECT
-      d.death_id,
-      vr.record_id,
-      vr.person_id,
-      p.first_name,
-      p.middle_name,
-      p.last_name,
-      p.gender,
-      p.date_of_birth,
-      d.death_date,
-      d.cause_of_death,
-      vr.location_id,
-      vr.registration_date,
-      vr.registered_by,
-      vr.status,
-      vr.cancel_reason,
-      vr.created_at,
-      vr.updated_at
-    FROM deaths d
-    INNER JOIN vital_records vr
-      ON d.record_id = vr.record_id
-    INNER JOIN persons p
-      ON vr.person_id = p.person_id
-    WHERE d.death_id = ?
-      AND vr.record_type = 'Death'
-  `;
-
-  connection.query(sql, [Number(id)], (error, results) => {
-    if (error) {
-      console.error("Get death by ID error:", error);
-
-      return res.status(500).json({
-        message: "Failed to retrieve death record",
-      });
-    }
+  try {
+    const [results] = await pool.query(
+      `SELECT
+          d.death_id,
+          vr.record_id,
+          vr.person_id,
+          p.first_name,
+          p.middle_name,
+          p.last_name,
+          p.gender,
+          p.date_of_birth,
+          d.death_date,
+          d.cause_of_death,
+          vr.location_id,
+          vr.registration_date,
+          vr.registered_by,
+          vr.status,
+          vr.cancel_reason,
+          vr.created_at,
+          vr.updated_at,
+          l.region,
+          l.zone,
+          l.city,
+          l.woreda,
+          l.kebele,
+          l.got
+       FROM deaths d
+       INNER JOIN vital_records vr ON d.record_id = vr.record_id
+       INNER JOIN persons p ON vr.person_id = p.person_id
+       LEFT JOIN locations l ON vr.location_id = l.location_id
+       WHERE d.death_id = ?`,
+      [id],
+    );
 
     if (results.length === 0) {
       return res.status(404).json({
-        message: "Death record not found",
+        message: "Death record not found.",
       });
     }
 
     return res.status(200).json(results[0]);
-  });
+  } catch (error) {
+    console.error("Get Death By ID Error:", error);
+
+    return res.status(500).json({
+      message: "Failed to retrieve death record.",
+      error: error.message,
+    });
+  }
 };
 
-// ==================== UPDATE DEATH ====================
+// =========================
+// UPDATE DEATH RECORD
+// =========================
 
-const updateDeath = (req, res) => {
+const updateDeath = async (req, res) => {
   const { id } = req.params;
 
   const {
@@ -435,23 +340,20 @@ const updateDeath = (req, res) => {
 
   if (!isPositiveInteger(id)) {
     return res.status(400).json({
-      message: "Invalid death ID",
+      message: "Invalid death ID.",
     });
   }
 
   if (
-    person_id == null ||
-    registration_date == null ||
-    registered_by == null ||
-    death_date == null ||
-    status == null ||
-    registration_date === "" ||
-    death_date === "" ||
-    status === ""
+    !person_id ||
+    !registration_date ||
+    !registered_by ||
+    !death_date ||
+    !status
   ) {
     return res.status(400).json({
       message:
-        "person_id, registration_date, registered_by, death_date, and status are required",
+        "Person ID, registration date, registered by, death date, and status are required.",
     });
   }
 
@@ -461,260 +363,248 @@ const updateDeath = (req, res) => {
     !isValidOptionalId(location_id)
   ) {
     return res.status(400).json({
-      message:
-        "person_id and registered_by must be positive integers; location_id must be a positive integer or null",
+      message: "Invalid person, location, or registered user ID.",
     });
   }
 
-  if (!isValidDate(registration_date) || !isValidDate(death_date)) {
+  if (!isValidDate(death_date) || !isValidDate(registration_date)) {
     return res.status(400).json({
-      message: "Dates must be valid dates in YYYY-MM-DD format",
+      message: "Dates must be valid and use YYYY-MM-DD format.",
     });
   }
 
   if (death_date > getToday()) {
     return res.status(400).json({
-      message: "death_date cannot be in the future",
+      message: "Death date cannot be in the future.",
     });
   }
 
   if (registration_date < death_date) {
     return res.status(400).json({
-      message: "registration_date cannot be earlier than death_date",
+      message: "Registration date cannot be before death date.",
     });
   }
 
-  const allowedStatuses = ["Pending", "Active"];
-
-  if (!allowedStatuses.includes(status)) {
+  if (!["Pending", "Active"].includes(status)) {
     return res.status(400).json({
-      message:
-        "Invalid status. Use Pending or Active; use the cancel endpoint to cancel a record",
+      message: "Status must be Pending or Active.",
     });
   }
 
   if (!validateCause(cause_of_death)) {
     return res.status(400).json({
-      message: "cause_of_death must be a string not exceeding 255 characters",
+      message: "Cause of death must not exceed 255 characters.",
     });
   }
 
-  validateReferences(
-    Number(person_id),
-    location_id == null ? null : Number(location_id),
-    Number(registered_by),
-    (validationError, problem) => {
-      if (validationError) {
-        console.error(
-          "Update death reference validation error:",
-          validationError,
-        );
+  let conn;
 
-        return res.status(500).json({
-          message: "Failed to validate death record references",
-        });
-      }
+  try {
+    conn = await pool.getConnection();
 
-      if (problem) {
-        return res.status(problem.status).json({
-          message: problem.message,
-        });
-      }
+    await conn.beginTransaction();
 
-      connection.beginTransaction((transactionError) => {
-        if (transactionError) {
-          console.error("Begin update transaction error:", transactionError);
+    const deathId = Number(id);
+    const personId = Number(person_id);
+    const registeredBy = Number(registered_by);
+    const locationId =
+      location_id === "" || location_id === undefined || location_id === null
+        ? null
+        : Number(location_id);
 
-          return res.status(500).json({
-            message: "Failed to start update transaction",
-          });
-        }
+    // Lock the selected record while updating it
+    const [existingRecords] = await conn.query(
+      `SELECT
+          d.death_id,
+          vr.record_id,
+          vr.status
+       FROM deaths d
+       INNER JOIN vital_records vr ON d.record_id = vr.record_id
+       WHERE d.death_id = ?
+       FOR UPDATE`,
+      [deathId],
+    );
 
-        const findSql = `
-          SELECT vr.record_id, vr.status
-          FROM deaths d
-          INNER JOIN vital_records vr
-            ON d.record_id = vr.record_id
-          WHERE d.death_id = ?
-            AND vr.record_type = 'Death'
-          FOR UPDATE
-        `;
+    if (existingRecords.length === 0) {
+      await conn.rollback();
 
-        connection.query(findSql, [Number(id)], (findError, results) => {
-          if (findError) {
-            console.error("Find death for update error:", findError);
-
-            return rollback(
-              res,
-              500,
-              "Failed to retrieve death record for update",
-            );
-          }
-
-          if (results.length === 0) {
-            return rollback(res, 404, "Death record not found");
-          }
-
-          if (results[0].status === "Cancelled") {
-            return rollback(
-              res,
-              409,
-              "Cancelled death records cannot be updated",
-            );
-          }
-
-          const updateSql = `
-            UPDATE vital_records vr
-            INNER JOIN deaths d
-              ON d.record_id = vr.record_id
-            SET vr.person_id = ?,
-                vr.location_id = ?,
-                vr.registration_date = ?,
-                vr.registered_by = ?,
-                vr.status = ?,
-                d.death_date = ?,
-                d.cause_of_death = ?
-            WHERE d.death_id = ?
-              AND vr.record_type = 'Death'
-          `;
-
-          const values = [
-            Number(person_id),
-            location_id == null ? null : Number(location_id),
-            registration_date,
-            Number(registered_by),
-            status,
-            death_date,
-            cause_of_death == null ? null : cause_of_death.trim() || null,
-            Number(id),
-          ];
-
-          connection.query(updateSql, values, (updateError) => {
-            if (updateError) {
-              console.error("Update death error:", updateError);
-
-              return rollback(res, 500, "Failed to update death record");
-            }
-
-            connection.commit((commitError) => {
-              if (commitError) {
-                console.error("Update death commit error:", commitError);
-
-                return rollback(
-                  res,
-                  500,
-                  "Failed to save death record changes",
-                );
-              }
-
-              return res.status(200).json({
-                message: "Death record updated successfully",
-                death_id: Number(id),
-                status,
-              });
-            });
-          });
-        });
+      return res.status(404).json({
+        message: "Death record not found.",
       });
-    },
-  );
+    }
+
+    if (existingRecords[0].status === "Cancelled") {
+      await conn.rollback();
+
+      return res.status(400).json({
+        message: "Cancelled death records cannot be updated.",
+      });
+    }
+
+    // Validate references using the transaction connection
+    await validateReferences(conn, personId, locationId, registeredBy);
+
+    const recordId = existingRecords[0].record_id;
+
+    // Update vital_records and deaths together
+    await conn.query(
+      `UPDATE vital_records vr
+       INNER JOIN deaths d ON vr.record_id = d.record_id
+       SET
+          vr.person_id = ?,
+          vr.location_id = ?,
+          vr.registration_date = ?,
+          vr.registered_by = ?,
+          vr.status = ?,
+          d.death_date = ?,
+          d.cause_of_death = ?
+       WHERE d.death_id = ?`,
+      [
+        personId,
+        locationId,
+        registration_date,
+        registeredBy,
+        status,
+        death_date,
+        cause_of_death ? cause_of_death.trim() : null,
+        deathId,
+      ],
+    );
+
+    await conn.commit();
+
+    return res.status(200).json({
+      message: "Death record updated successfully.",
+      death_id: deathId,
+      record_id: recordId,
+      status,
+    });
+  } catch (error) {
+    if (conn) {
+      await conn.rollback();
+    }
+
+    console.error("Update Death Error:", error);
+
+    if (
+      error.message === "The selected person does not exist." ||
+      error.message === "The selected location does not exist." ||
+      error.message === "The selected registered user does not exist."
+    ) {
+      return res.status(400).json({ message: error.message });
+    }
+
+    return res.status(500).json({
+      message: "Failed to update death record.",
+      error: error.message,
+    });
+  } finally {
+    if (conn) {
+      conn.release();
+    }
+  }
 };
 
-// ==================== CANCEL DEATH ====================
+// =========================
+// CANCEL DEATH RECORD
+// =========================
 
-const cancelDeath = (req, res) => {
+const cancelDeath = async (req, res) => {
   const { id } = req.params;
   const { cancel_reason } = req.body;
 
   if (!isPositiveInteger(id)) {
     return res.status(400).json({
-      message: "Invalid death ID",
+      message: "Invalid death ID.",
     });
   }
 
-  if (typeof cancel_reason !== "string" || cancel_reason.trim() === "") {
+  if (
+    !cancel_reason ||
+    typeof cancel_reason !== "string" ||
+    !cancel_reason.trim()
+  ) {
     return res.status(400).json({
-      message: "Cancellation reason is required",
+      message: "Cancellation reason is required.",
     });
   }
 
   if (cancel_reason.trim().length > 500) {
     return res.status(400).json({
-      message: "Cancellation reason cannot exceed 500 characters",
+      message: "Cancellation reason must not exceed 500 characters.",
     });
   }
 
-  const findSql = `
-    SELECT vr.status
-    FROM deaths d
-    INNER JOIN vital_records vr
-      ON d.record_id = vr.record_id
-    WHERE d.death_id = ?
-      AND vr.record_type = 'Death'
-  `;
+  let conn;
 
-  connection.query(findSql, [Number(id)], (findError, results) => {
-    if (findError) {
-      console.error("Find death for cancellation error:", findError);
+  try {
+    conn = await pool.getConnection();
 
-      return res.status(500).json({
-        message: "Failed to retrieve death record",
-      });
-    }
+    await conn.beginTransaction();
 
-    if (results.length === 0) {
-      return res.status(404).json({
-        message: "Death record not found",
-      });
-    }
-
-    if (results[0].status === "Cancelled") {
-      return res.status(409).json({
-        message: "Death record is already cancelled",
-      });
-    }
-
-    const sql = `
-      UPDATE vital_records vr
-      INNER JOIN deaths d
-        ON d.record_id = vr.record_id
-      SET vr.status = 'Cancelled',
-          vr.cancel_reason = ?
-      WHERE d.death_id = ?
-        AND vr.record_type = 'Death'
-        AND vr.status IN ('Pending', 'Active')
-    `;
-
-    connection.query(
-      sql,
-      [cancel_reason.trim(), Number(id)],
-      (error, result) => {
-        if (error) {
-          console.error("Cancel death error:", error);
-
-          return res.status(500).json({
-            message: "Failed to cancel death record",
-          });
-        }
-
-        if (result.affectedRows === 0) {
-          return res.status(409).json({
-            message: "Death record could not be cancelled",
-          });
-        }
-
-        return res.status(200).json({
-          message: "Death record cancelled successfully",
-          death_id: Number(id),
-          status: "Cancelled",
-          cancel_reason: cancel_reason.trim(),
-        });
-      },
+    const [records] = await conn.query(
+      `SELECT
+          d.death_id,
+          vr.record_id,
+          vr.status
+       FROM deaths d
+       INNER JOIN vital_records vr ON d.record_id = vr.record_id
+       WHERE d.death_id = ?
+       FOR UPDATE`,
+      [id],
     );
-  });
+
+    if (records.length === 0) {
+      await conn.rollback();
+
+      return res.status(404).json({
+        message: "Death record not found.",
+      });
+    }
+
+    if (records[0].status === "Cancelled") {
+      await conn.rollback();
+
+      return res.status(400).json({
+        message: "Death record is already cancelled.",
+      });
+    }
+
+    await conn.query(
+      `UPDATE vital_records
+       SET status = ?, cancel_reason = ?
+       WHERE record_id = ?`,
+      ["Cancelled", cancel_reason.trim(), records[0].record_id],
+    );
+
+    await conn.commit();
+
+    return res.status(200).json({
+      message: "Death record cancelled successfully.",
+      death_id: Number(id),
+      status: "Cancelled",
+    });
+  } catch (error) {
+    if (conn) {
+      await conn.rollback();
+    }
+
+    console.error("Cancel Death Error:", error);
+
+    return res.status(500).json({
+      message: "Failed to cancel death record.",
+      error: error.message,
+    });
+  } finally {
+    if (conn) {
+      conn.release();
+    }
+  }
 };
 
-// ==================== EXPORT FUNCTIONS ====================
+// =========================
+// EXPORT CONTROLLERS
+// =========================
 
 module.exports = {
   createDeath,

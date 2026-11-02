@@ -3,7 +3,8 @@ import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import Login from "./pages/Login";
 import Dashboard from "./pages/Dashboard";
 import Persons from "./pages/Persons";
-
+import Birth from "./pages/Birth";
+import Death from "./pages/Death";
 function ProtectedRoute({ children }) {
   const token = localStorage.getItem("token");
 
@@ -36,6 +37,23 @@ function App() {
           element={
             <ProtectedRoute>
               <Persons />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/births"
+          element={
+            <ProtectedRoute>
+              <Birth />
+            </ProtectedRoute>
+          }
+        />
+
+        <Route
+          path="/deaths"
+          element={
+            <ProtectedRoute>
+              <Death />
             </ProtectedRoute>
           }
         />

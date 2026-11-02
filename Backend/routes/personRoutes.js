@@ -7,6 +7,7 @@ const {
   getPersonById,
   updatePerson,
   deletePerson,
+  searchPersons,
 } = require("../controllers/personController");
 
 const verifyToken = require("../middleware/authMiddleware");

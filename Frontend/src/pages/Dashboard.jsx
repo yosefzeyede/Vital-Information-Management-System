@@ -39,7 +39,7 @@ function Dashboard() {
         });
 
         const data = await response.json();
-        console.log(data);
+
         if (!response.ok) {
           throw new Error(data.message || "Failed to load dashboard");
         }
@@ -127,12 +127,12 @@ function Dashboard() {
             Persons
           </button>
 
-          <button className="nav-item">
+          <button onClick={() => navigate("/births")} className="nav-item">
             <Baby size={19} />
             Birth Records
           </button>
 
-          <button className="nav-item">
+          <button onClick={() => navigate("/deaths")} className="nav-item">
             <HeartPulse size={19} />
             Death Records
           </button>
@@ -147,7 +147,7 @@ function Dashboard() {
             Certificates
           </button>
 
-          <button className="nav-item">
+          <button className="nav-item" onClick={() => navigate("/locations")}>
             <MapPin size={19} />
             Locations
           </button>

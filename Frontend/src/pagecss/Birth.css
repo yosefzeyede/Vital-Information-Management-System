@@ -1,0 +1,618 @@
+.birth-page {
+  padding: 25px;
+  color: #263746;
+  min-height: 100vh;
+  background: #f7f9fc;
+}
+
+.birth-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 15px;
+  margin-bottom: 25px;
+}
+
+.birth-header h1 {
+  margin: 0 0 7px;
+  font-size: 27px;
+  color: #173c4a;
+}
+
+.birth-header p {
+  margin: 0;
+  color: #778895;
+  font-size: 14px;
+}
+
+.birth-primary-btn,
+.birth-secondary-btn,
+.birth-danger-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: none;
+  border-radius: 8px;
+  padding: 11px 17px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: 0.2s;
+}
+
+.birth-primary-btn {
+  color: white;
+  background: #087f8c;
+}
+
+.birth-primary-btn:hover {
+  background: #066b76;
+}
+
+.birth-primary-btn:disabled,
+.birth-secondary-btn:disabled,
+.birth-danger-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.birth-secondary-btn {
+  color: #465966;
+  background: #edf1f4;
+}
+
+.birth-secondary-btn:hover {
+  background: #dfe6eb;
+}
+
+.birth-danger-btn {
+  color: white;
+  background: #d94848;
+}
+
+.birth-danger-btn:hover {
+  background: #bd3535;
+}
+
+/* Alerts */
+
+.birth-alert {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 15px;
+  margin-bottom: 18px;
+  border-radius: 8px;
+  font-size: 14px;
+}
+
+.birth-alert span {
+  flex: 1;
+}
+
+.birth-alert button {
+  display: flex;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+.birth-success {
+  color: #176b45;
+  background: #e6f7ee;
+  border: 1px solid #bce8ce;
+}
+
+.birth-error {
+  color: #a72d2d;
+  background: #fff0f0;
+  border: 1px solid #f3caca;
+}
+
+/* Summary cards */
+
+.birth-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 17px;
+  margin-bottom: 25px;
+}
+
+.birth-summary-card {
+  display: flex;
+  align-items: center;
+  gap: 15px;
+  padding: 20px;
+  background: white;
+  border: 1px solid #e9eef2;
+  border-radius: 11px;
+  box-shadow: 0 2px 8px rgba(20, 50, 65, 0.035);
+}
+
+.birth-summary-icon {
+  width: 46px;
+  height: 46px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #087f8c;
+  background: #e5f5f5;
+  border-radius: 10px;
+}
+
+.birth-summary-icon.pending-icon {
+  color: #b7791f;
+  background: #fff5df;
+}
+
+.birth-summary-icon.active-icon {
+  color: #21865b;
+  background: #e4f7ed;
+}
+
+.birth-summary-icon.cancelled-icon {
+  color: #c23d3d;
+  background: #ffebeb;
+}
+
+.birth-summary-card h3 {
+  margin: 0 0 4px;
+  color: #203d4a;
+  font-size: 23px;
+}
+
+.birth-summary-card p {
+  margin: 0;
+  color: #80909b;
+  font-size: 13px;
+}
+
+/* Toolbar */
+
+.birth-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.birth-search {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  max-width: 480px;
+  padding: 0 13px;
+  background: white;
+  border: 1px solid #dce5e9;
+  border-radius: 8px;
+  color: #83939d;
+}
+
+.birth-search input {
+  width: 100%;
+  height: 43px;
+  border: none;
+  outline: none;
+  color: #344955;
+  background: transparent;
+  font-size: 14px;
+}
+
+.birth-toolbar select {
+  height: 45px;
+  min-width: 150px;
+  padding: 0 12px;
+  border: 1px solid #dce5e9;
+  border-radius: 8px;
+  background: white;
+  color: #405461;
+  outline: none;
+}
+
+.birth-refresh-btn {
+  width: 44px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #087f8c;
+  background: white;
+  border: 1px solid #dce5e9;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.birth-refresh-btn:hover {
+  background: #e9f7f7;
+}
+
+.birth-refresh-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Table */
+
+.birth-table-container {
+  background: white;
+  border: 1px solid #e8eef1;
+  border-radius: 11px;
+  overflow: hidden;
+  box-shadow: 0 2px 8px rgba(20, 50, 65, 0.035);
+}
+
+.birth-table-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 19px 21px;
+  border-bottom: 1px solid #edf1f3;
+}
+
+.birth-table-heading h2 {
+  margin: 0;
+  color: #244552;
+  font-size: 17px;
+}
+
+.birth-table-heading span {
+  color: #82919b;
+  font-size: 13px;
+}
+
+.birth-table-scroll {
+  width: 100%;
+  overflow-x: auto;
+}
+
+.birth-table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 850px;
+}
+
+.birth-table th,
+.birth-table td {
+  padding: 15px 17px;
+  text-align: left;
+  border-bottom: 1px solid #edf1f3;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.birth-table th {
+  color: #6e818c;
+  background: #f8fafb;
+  font-weight: 600;
+}
+
+.birth-table td {
+  color: #4d606c;
+}
+
+.birth-table tbody tr:hover {
+  background: #f8fcfc;
+}
+
+.birth-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.birth-child-name {
+  color: #1d4653 !important;
+  font-weight: 600;
+}
+
+/* Status */
+
+.birth-status {
+  display: inline-block;
+  padding: 5px 10px;
+  border-radius: 20px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.birth-status-pending {
+  color: #95620d;
+  background: #fff4d8;
+}
+
+.birth-status-active {
+  color: #187348;
+  background: #e2f6eb;
+}
+
+.birth-status-cancelled {
+  color: #b33232;
+  background: #ffebeb;
+}
+
+/* Actions */
+
+.birth-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.birth-actions button {
+  width: 33px;
+  height: 33px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 7px;
+  cursor: pointer;
+  transition: 0.2s;
+}
+
+.birth-edit-btn {
+  color: #087f8c;
+  background: #e8f6f6;
+}
+
+.birth-edit-btn:hover {
+  background: #d1eeee;
+}
+
+.birth-cancel-btn {
+  color: #c23d3d;
+  background: #fff0f0;
+}
+
+.birth-cancel-btn:hover {
+  background: #ffdddd;
+}
+
+.birth-actions button:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+/* Empty state */
+
+.birth-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 55px 20px;
+  color: #91a0a9;
+  text-align: center;
+}
+
+.birth-empty h3 {
+  margin: 12px 0 5px;
+  color: #415966;
+  font-size: 16px;
+}
+
+.birth-empty p {
+  margin: 0;
+  font-size: 13px;
+}
+
+.birth-loading-icon {
+  animation: birth-spin 1s linear infinite;
+}
+
+@keyframes birth-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Modal */
+
+.birth-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(15, 35, 45, 0.55);
+  overflow-y: auto;
+}
+
+.birth-modal {
+  width: 100%;
+  max-width: 650px;
+  max-height: 92vh;
+  overflow-y: auto;
+  background: white;
+  border-radius: 13px;
+  box-shadow: 0 15px 45px rgba(0, 0, 0, 0.18);
+}
+
+.birth-cancel-modal {
+  max-width: 480px;
+}
+
+.birth-modal-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 15px;
+  padding: 22px 24px;
+  border-bottom: 1px solid #edf1f3;
+}
+
+.birth-modal-header h2 {
+  margin: 0 0 6px;
+  color: #1c4653;
+  font-size: 20px;
+}
+
+.birth-modal-header p {
+  margin: 0;
+  color: #83929c;
+  font-size: 13px;
+}
+
+.birth-close-btn {
+  width: 34px;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #71828d;
+  background: #f0f4f6;
+  border: none;
+  border-radius: 7px;
+  cursor: pointer;
+}
+
+.birth-close-btn:hover {
+  color: #c23d3d;
+  background: #ffebeb;
+}
+
+.birth-modal form {
+  padding: 20px 24px 24px;
+}
+
+.birth-form-section {
+  margin-bottom: 22px;
+}
+
+.birth-form-section h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 15px;
+  padding-bottom: 10px;
+  color: #087f8c;
+  border-bottom: 1px solid #eaf0f2;
+  font-size: 15px;
+}
+
+.birth-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 15px;
+}
+
+.birth-form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin-bottom: 15px;
+}
+
+.birth-form-group label {
+  color: #415762;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.birth-form-group input,
+.birth-form-group select,
+.birth-form-group textarea {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 11px 12px;
+  color: #344955;
+  background: white;
+  border: 1px solid #dce5e9;
+  border-radius: 7px;
+  outline: none;
+  font-size: 13px;
+  font-family: inherit;
+}
+
+.birth-form-group input:focus,
+.birth-form-group select:focus,
+.birth-form-group textarea:focus {
+  border-color: #087f8c;
+  box-shadow: 0 0 0 3px rgba(8, 127, 140, 0.1);
+}
+
+.birth-form-group textarea {
+  resize: vertical;
+}
+
+.birth-form-group small {
+  color: #8998a1;
+  text-align: right;
+  font-size: 11px;
+}
+
+.birth-modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 15px;
+  padding-top: 17px;
+  border-top: 1px solid #edf1f3;
+}
+
+/* Responsive */
+
+@media (max-width: 900px) {
+  .birth-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 600px) {
+  .birth-page {
+    padding: 15px;
+  }
+
+  .birth-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .birth-header h1 {
+    font-size: 23px;
+  }
+
+  .birth-summary {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+
+  .birth-toolbar {
+    flex-wrap: wrap;
+  }
+
+  .birth-search {
+    max-width: none;
+    flex-basis: 100%;
+  }
+
+  .birth-toolbar select {
+    flex: 1;
+  }
+
+  .birth-form-grid {
+    grid-template-columns: 1fr;
+    gap: 0;
+  }
+
+  .birth-modal-overlay {
+    align-items: flex-start;
+    padding: 10px;
+  }
+
+  .birth-modal {
+    margin: auto 0;
+  }
+
+  .birth-modal-header,
+  .birth-modal form {
+    padding-left: 16px;
+    padding-right: 16px;
+  }
+
+  .birth-modal-footer {
+    flex-wrap: wrap;
+  }
+}

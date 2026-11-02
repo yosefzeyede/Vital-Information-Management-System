@@ -109,7 +109,7 @@ const checkLocationExists = (locationId, callback) => {
 
 // ==================== CREATE BIRTH ====================
 
-const createBirth = (req, res) => {
+const createBirth = async (req, res) => {
   const {
     person_id,
     location_id,
@@ -119,18 +119,21 @@ const createBirth = (req, res) => {
     mother_id,
   } = req.body;
 
+  // 1. Required fields validation
   if (isEmptyId(person_id) || !registration_date || isEmptyId(registered_by)) {
     return res.status(400).json({
       message: "person_id, registration_date, and registered_by are required",
     });
   }
 
+  // 2. Positive integer validation
   if (!isPositiveInteger(person_id) || !isPositiveInteger(registered_by)) {
     return res.status(400).json({
       message: "person_id and registered_by must be positive integers",
     });
   }
 
+  // 3. Optional IDs validation
   for (const [field, value] of [
     ["location_id", location_id],
     ["father_id", father_id],
@@ -145,18 +148,21 @@ const createBirth = (req, res) => {
     }
   }
 
+  // 4. Date validation
   if (!isValidDate(registration_date)) {
     return res.status(400).json({
       message: "registration_date must be a valid date in YYYY-MM-DD format",
     });
   }
 
+  // 5. Normalize IDs
   const personId = Number(person_id);
   const registeredBy = Number(registered_by);
   const locationId = normalizeOptionalId(location_id);
   const fatherId = normalizeOptionalId(father_id);
   const motherId = normalizeOptionalId(mother_id);
 
+  // 6. Relationship validation
   if (fatherId !== null && fatherId === motherId) {
     return res.status(400).json({
       message: "Father and mother must be different persons",
@@ -169,164 +175,170 @@ const createBirth = (req, res) => {
     });
   }
 
-  connection.beginTransaction((transactionError) => {
-    if (transactionError) {
-      console.error("Begin birth transaction error:", transactionError);
+  // 7. Get a dedicated database connection
+  let conn;
+  let transactionStarted = false;
 
-      return res.status(500).json({
-        message: "Failed to start database transaction",
+  try {
+    const promisePool = connection.promise();
+
+    conn = await promisePool.getConnection();
+
+    // 8. Start transaction
+    await conn.beginTransaction();
+    transactionStarted = true;
+
+    // 9. Check child exists
+    const [childRows] = await conn.query(
+      "SELECT person_id FROM persons WHERE person_id = ?",
+      [personId],
+    );
+
+    if (childRows.length === 0) {
+      await conn.rollback();
+      transactionStarted = false;
+
+      return res.status(400).json({
+        message: "Person does not exist",
       });
     }
 
-    checkPersonExists(personId, (personError, personExists) => {
-      if (personError) {
-        return rollbackResponse(res, 500, "Failed to validate child");
-      }
+    // 10. Check father exists
+    if (fatherId !== null) {
+      const [fatherRows] = await conn.query(
+        "SELECT person_id FROM persons WHERE person_id = ?",
+        [fatherId],
+      );
 
-      if (!personExists) {
-        return rollbackResponse(res, 400, "Person does not exist");
-      }
+      if (fatherRows.length === 0) {
+        await conn.rollback();
+        transactionStarted = false;
 
-      const checkFather = (callback) => {
-        if (fatherId === null) return callback(null, true);
-        checkPersonExists(fatherId, callback);
-      };
-
-      checkFather((fatherError, fatherExists) => {
-        if (fatherError) {
-          return rollbackResponse(res, 500, "Failed to validate father");
-        }
-
-        if (!fatherExists) {
-          return rollbackResponse(res, 400, "Father does not exist");
-        }
-
-        const checkMother = (callback) => {
-          if (motherId === null) return callback(null, true);
-          checkPersonExists(motherId, callback);
-        };
-
-        checkMother((motherError, motherExists) => {
-          if (motherError) {
-            return rollbackResponse(res, 500, "Failed to validate mother");
-          }
-
-          if (!motherExists) {
-            return rollbackResponse(res, 400, "Mother does not exist");
-          }
-
-          checkUserExists(registeredBy, (userError, userExists) => {
-            if (userError) {
-              return rollbackResponse(
-                res,
-                500,
-                "Failed to validate registering user",
-              );
-            }
-
-            if (!userExists) {
-              return rollbackResponse(
-                res,
-                400,
-                "Registering user does not exist",
-              );
-            }
-
-            checkLocationExists(locationId, (locationError, locationExists) => {
-              if (locationError) {
-                return rollbackResponse(
-                  res,
-                  500,
-                  "Failed to validate location",
-                );
-              }
-
-              if (!locationExists) {
-                return rollbackResponse(res, 400, "Location does not exist");
-              }
-
-              const vitalRecordSql = `
-                INSERT INTO vital_records (
-                  person_id,
-                  location_id,
-                  record_type,
-                  registration_date,
-                  registered_by,
-                  status
-                )
-                VALUES (?, ?, 'Birth', ?, ?, 'Pending')
-              `;
-
-              connection.query(
-                vitalRecordSql,
-                [personId, locationId, registration_date, registeredBy],
-                (recordError, recordResult) => {
-                  if (recordError) {
-                    return connection.rollback(() => {
-                      handleDatabaseError(
-                        recordError,
-                        res,
-                        "Create birth vital record error:",
-                      );
-                    });
-                  }
-
-                  const recordId = recordResult.insertId;
-
-                  const birthSql = `
-                    INSERT INTO births (
-                      record_id,
-                      father_id,
-                      mother_id
-                    )
-                    VALUES (?, ?, ?)
-                  `;
-
-                  connection.query(
-                    birthSql,
-                    [recordId, fatherId, motherId],
-                    (birthError, birthResult) => {
-                      if (birthError) {
-                        return connection.rollback(() => {
-                          handleDatabaseError(
-                            birthError,
-                            res,
-                            "Create birth details error:",
-                          );
-                        });
-                      }
-
-                      connection.commit((commitError) => {
-                        if (commitError) {
-                          return connection.rollback(() => {
-                            console.error(
-                              "Commit birth transaction error:",
-                              commitError,
-                            );
-
-                            return res.status(500).json({
-                              message: "Failed to save birth record",
-                            });
-                          });
-                        }
-
-                        return res.status(201).json({
-                          message: "Birth record created successfully",
-                          record_id: recordId,
-                          birth_id: birthResult.insertId,
-                          status: "Pending",
-                        });
-                      });
-                    },
-                  );
-                },
-              );
-            });
-          });
+        return res.status(400).json({
+          message: "Father does not exist",
         });
+      }
+    }
+
+    // 11. Check mother exists
+    if (motherId !== null) {
+      const [motherRows] = await conn.query(
+        "SELECT person_id FROM persons WHERE person_id = ?",
+        [motherId],
+      );
+
+      if (motherRows.length === 0) {
+        await conn.rollback();
+        transactionStarted = false;
+
+        return res.status(400).json({
+          message: "Mother does not exist",
+        });
+      }
+    }
+
+    // 12. Check registering user exists
+    const [userRows] = await conn.query(
+      "SELECT user_id FROM users WHERE user_id = ?",
+      [registeredBy],
+    );
+
+    if (userRows.length === 0) {
+      await conn.rollback();
+      transactionStarted = false;
+
+      return res.status(400).json({
+        message: "Registering user does not exist",
       });
+    }
+
+    // 13. Check location exists (if provided)
+    if (locationId !== null) {
+      const [locationRows] = await conn.query(
+        "SELECT location_id FROM locations WHERE location_id = ?",
+        [locationId],
+      );
+
+      if (locationRows.length === 0) {
+        await conn.rollback();
+        transactionStarted = false;
+
+        return res.status(400).json({
+          message: "Location does not exist",
+        });
+      }
+    }
+
+    // 14. Insert into vital_records
+    const vitalRecordSql = `
+      INSERT INTO vital_records (
+        person_id,
+        location_id,
+        record_type,
+        registration_date,
+        registered_by,
+        status
+      )
+      VALUES (?, ?, 'Birth', ?, ?, 'Pending')
+    `;
+
+    const [recordResult] = await conn.query(vitalRecordSql, [
+      personId,
+      locationId,
+      registration_date,
+      registeredBy,
+    ]);
+
+    const recordId = recordResult.insertId;
+
+    // 15. Insert into births
+    const birthSql = `
+      INSERT INTO births (
+        record_id,
+        father_id,
+        mother_id
+      )
+      VALUES (?, ?, ?)
+    `;
+
+    const [birthResult] = await conn.query(birthSql, [
+      recordId,
+      fatherId,
+      motherId,
+    ]);
+
+    // 16. Commit transaction
+    await conn.commit();
+    transactionStarted = false;
+
+    return res.status(201).json({
+      message: "Birth record created successfully",
+      record_id: recordId,
+      birth_id: birthResult.insertId,
+      status: "Pending",
     });
-  });
+  } catch (error) {
+    // 17. Rollback if an error occurs
+    if (conn && transactionStarted) {
+      try {
+        await conn.rollback();
+      } catch (rollbackError) {
+        console.error("Birth rollback error:", rollbackError);
+      }
+    }
+
+    console.error("Create birth error:", error);
+
+    return res.status(500).json({
+      message: "Failed to create birth record",
+      error: error.message,
+    });
+  } finally {
+    // 18. Release connection back to pool
+    if (conn) {
+      conn.release();
+    }
+  }
 };
 
 // ==================== GET ALL BIRTHS ====================
