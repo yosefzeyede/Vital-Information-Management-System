@@ -8,6 +8,21 @@ const tables = [
     role ENUM('admin', 'officer')
         NOT NULL DEFAULT 'officer',
 
+    -- Amharic user information
+    amharic_first_name VARCHAR(100),
+    amharic_father_name VARCHAR(100),
+    amharic_grandfather_name VARCHAR(100),
+    amharic_full_name VARCHAR(300),
+
+    -- English user information  
+    english_first_name VARCHAR(100),
+    english_middle_name VARCHAR(100),
+    english_last_name VARCHAR(100),
+
+    -- Contact information
+    phone_number VARCHAR(20),
+    email VARCHAR(100),
+
     is_active BOOLEAN NOT NULL DEFAULT TRUE,
 
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -24,12 +39,20 @@ const tables = [
   ` CREATE TABLE IF NOT EXISTS persons (
     person_id INT AUTO_INCREMENT PRIMARY KEY,
 
-    first_name VARCHAR(50) NOT NULL,
-    middle_name VARCHAR(50) NOT NULL,
-    last_name VARCHAR(50) NOT NULL,
+    -- Amharic person information
+    amharic_first_name VARCHAR(100) NOT NULL,
+    amharic_father_name VARCHAR(100) NOT NULL,
+    amharic_grandfather_name VARCHAR(100) NOT NULL,
+    amharic_full_name VARCHAR(300) NOT NULL,
+
+    -- English person information
+    english_first_name VARCHAR(100),
+    english_middle_name VARCHAR(100),
+    english_last_name VARCHAR(100),
 
     gender ENUM('Male','Female') NOT NULL,
     date_of_birth DATE,
+    ethiopian_date VARCHAR(50),
 
     phone VARCHAR(20),
     address VARCHAR(255),
@@ -45,7 +68,7 @@ const tables = [
         REFERENCES locations(location_id),
 
     INDEX idx_person_name
-        (first_name, middle_name, last_name)
+        (amharic_first_name, amharic_father_name, amharic_grandfather_name)
 )`,
   `    CREATE TABLE IF NOT EXISTS vital_records (
         record_id INT AUTO_INCREMENT PRIMARY KEY,

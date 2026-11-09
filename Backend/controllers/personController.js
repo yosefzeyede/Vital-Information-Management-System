@@ -19,8 +19,7 @@ const isValidId = (id) => {
 const isValidName = (value) =>
   typeof value === "string" &&
   value.trim().length >= 1 &&
-  value.trim().length <= 100 &&
-  /^\p{L}[\p{L}\p{M} .'-]*$/u.test(value.trim());
+  value.trim().length <= 100;
 
 const isValidPhone = (phone) => {
   if (phone === null || phone === undefined || phone === "") {
@@ -57,22 +56,38 @@ const validatePerson = (body) => {
   const errors = [];
 
   const {
-    first_name,
-    middle_name,
-    last_name,
+    amharic_first_name,
+    amharic_father_name,
+    amharic_grandfather_name,
+    english_first_name,
+    english_middle_name,
+    english_last_name,
     gender,
     date_of_birth,
+    ethiopian_date,
     phone,
     address,
   } = body;
 
+  // Validate Amharic names
   for (const [field, value] of Object.entries({
-    first_name,
-    middle_name,
-    last_name,
+    amharic_first_name,
+    amharic_father_name,
+    amharic_grandfather_name,
   })) {
     if (!isValidName(value)) {
-      errors.push(`${field} is required and must be a valid name`);
+      errors.push(`${field} is required and must be a valid Amharic name`);
+    }
+  }
+
+  // Validate English names (optional)
+  for (const [field, value] of Object.entries({
+    english_first_name,
+    english_middle_name,
+    english_last_name,
+  })) {
+    if (value && !isValidName(value)) {
+      errors.push(`${field} must be a valid name if provided`);
     }
   }
 
@@ -187,11 +202,16 @@ const createPerson = async (req, res) => {
   }
 
   const {
-    first_name,
-    middle_name,
-    last_name,
+    amharic_first_name,
+    amharic_father_name,
+    amharic_grandfather_name,
+    amharic_full_name,
+    english_first_name,
+    english_middle_name,
+    english_last_name,
     gender,
     date_of_birth,
+    ethiopian_date,
     phone,
     address,
     region,
@@ -227,18 +247,24 @@ const createPerson = async (req, res) => {
 
     const locationId = locationResult.insertId;
 
-    // 2. Insert the person using the new location_id.
+    // 2. Insert the person using the new location_id with Amharic information.
     const [personResult] = await db.execute(
       `INSERT INTO persons
-       (first_name, middle_name, last_name, gender,
-        date_of_birth, phone, address, location_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+       (amharic_first_name, amharic_father_name, amharic_grandfather_name, amharic_full_name,
+        english_first_name, english_middle_name, english_last_name,
+        gender, date_of_birth, ethiopian_date, phone, address, location_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
-        first_name.trim(),
-        middle_name.trim(),
-        last_name.trim(),
+        amharic_first_name.trim(),
+        amharic_father_name.trim(),
+        amharic_grandfather_name.trim(),
+        amharic_full_name?.trim() || `${amharic_first_name.trim()} ${amharic_father_name.trim()} ${amharic_grandfather_name.trim()}`,
+        english_first_name?.trim() || null,
+        english_middle_name?.trim() || null,
+        english_last_name?.trim() || null,
         gender,
         date_of_birth || null,
+        ethiopian_date?.trim() || null,
         phone || null,
         address?.trim() || null,
         locationId,
@@ -276,11 +302,16 @@ const getPersons = (req, res) => {
   const sql = `
     SELECT
       p.person_id,
-      p.first_name,
-      p.middle_name,
-      p.last_name,
+      p.amharic_first_name,
+      p.amharic_father_name,
+      p.amharic_grandfather_name,
+      p.amharic_full_name,
+      p.english_first_name,
+      p.english_middle_name,
+      p.english_last_name,
       p.gender,
       p.date_of_birth,
+      p.ethiopian_date,
       p.phone,
       p.address,
       p.location_id,
@@ -326,11 +357,16 @@ const getPersonById = (req, res) => {
   const sql = `
     SELECT
       p.person_id,
-      p.first_name,
-      p.middle_name,
-      p.last_name,
+      p.amharic_first_name,
+      p.amharic_father_name,
+      p.amharic_grandfather_name,
+      p.amharic_full_name,
+      p.english_first_name,
+      p.english_middle_name,
+      p.english_last_name,
       p.gender,
       p.date_of_birth,
+      p.ethiopian_date,
       p.phone,
       p.address,
       p.location_id,
@@ -400,11 +436,16 @@ const updatePerson = async (req, res) => {
   }
 
   const {
-    first_name,
-    middle_name,
-    last_name,
+    amharic_first_name,
+    amharic_father_name,
+    amharic_grandfather_name,
+    amharic_full_name,
+    english_first_name,
+    english_middle_name,
+    english_last_name,
     gender,
     date_of_birth,
+    ethiopian_date,
     phone,
     address,
     region,
@@ -476,21 +517,31 @@ const updatePerson = async (req, res) => {
 
     const [result] = await db.execute(
       `UPDATE persons
-       SET first_name = ?,
-           middle_name = ?,
-           last_name = ?,
+       SET amharic_first_name = ?,
+           amharic_father_name = ?,
+           amharic_grandfather_name = ?,
+           amharic_full_name = ?,
+           english_first_name = ?,
+           english_middle_name = ?,
+           english_last_name = ?,
            gender = ?,
            date_of_birth = ?,
+           ethiopian_date = ?,
            phone = ?,
            address = ?,
            location_id = ?
        WHERE person_id = ?`,
       [
-        first_name.trim(),
-        middle_name.trim(),
-        last_name.trim(),
+        amharic_first_name.trim(),
+        amharic_father_name.trim(),
+        amharic_grandfather_name.trim(),
+        amharic_full_name?.trim() || `${amharic_first_name.trim()} ${amharic_father_name.trim()} ${amharic_grandfather_name.trim()}`,
+        english_first_name?.trim() || null,
+        english_middle_name?.trim() || null,
+        english_last_name?.trim() || null,
         gender,
         date_of_birth || null,
+        ethiopian_date?.trim() || null,
         phone || null,
         address?.trim() || null,
         finalLocationId,
@@ -572,11 +623,16 @@ const searchPersons = (req, res) => {
   const sql = `
     SELECT
       p.person_id,
-      p.first_name,
-      p.middle_name,
-      p.last_name,
+      p.amharic_first_name,
+      p.amharic_father_name,
+      p.amharic_grandfather_name,
+      p.amharic_full_name,
+      p.english_first_name,
+      p.english_middle_name,
+      p.english_last_name,
       p.gender,
       p.date_of_birth,
+      p.ethiopian_date,
       p.phone,
       p.address,
       p.location_id,
@@ -592,14 +648,19 @@ const searchPersons = (req, res) => {
     LEFT JOIN locations l ON p.location_id = l.location_id
     WHERE
       ${isNumericId ? "p.person_id = ? OR" : ""}
-      LOWER(p.first_name) LIKE LOWER(?)
+      LOWER(p.amharic_first_name) LIKE LOWER(?) OR
+      LOWER(p.amharic_father_name) LIKE LOWER(?) OR
+      LOWER(p.amharic_grandfather_name) LIKE LOWER(?) OR
+      LOWER(p.amharic_full_name) LIKE LOWER(?) OR
+      LOWER(p.english_first_name) LIKE LOWER(?) OR
+      LOWER(p.english_last_name) LIKE LOWER(?)
     ORDER BY p.person_id DESC
     LIMIT 50
   `;
 
   const searchValue = `%${query}%`;
 
-  const params = isNumericId ? [Number(query), searchValue] : [searchValue];
+  const params = isNumericId ? [Number(query), searchValue, searchValue, searchValue, searchValue, searchValue, searchValue] : [searchValue, searchValue, searchValue, searchValue, searchValue, searchValue];
 
   connection.query(sql, params, (err, results) => {
     if (err) {
