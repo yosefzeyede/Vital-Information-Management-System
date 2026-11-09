@@ -1,4 +1,15 @@
 const connection = require("../config/db");
+const { 
+  isPositiveInteger, 
+  isValidDate, 
+  getToday,
+  isValidCause,
+  isValidString
+} = require("../utils/validators");
+const { 
+  handleDatabaseError, 
+  rollbackResponseAsync 
+} = require("../utils/dbErrors");
 
 // Get Promise-based pool
 const pool = connection.promise();
@@ -7,33 +18,11 @@ const pool = connection.promise();
 // Helper Functions
 // =========================
 
-const isPositiveInteger = (value) =>
-  Number.isInteger(Number(value)) && Number(value) > 0;
-
-const isValidDate = (value) => {
-  if (!value || typeof value !== "string") return false;
-
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
-
-  const date = new Date(`${value}T00:00:00`);
-  return (
-    !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value
-  );
-};
-
-const getToday = () => new Date().toISOString().slice(0, 10);
-
 const isValidOptionalId = (value) =>
   value === null ||
   value === undefined ||
   value === "" ||
   isPositiveInteger(value);
-
-const validateCause = (cause) =>
-  cause === null ||
-  cause === undefined ||
-  cause === "" ||
-  (typeof cause === "string" && cause.trim().length <= 255);
 
 // Check that referenced records exist.
 // These queries use the same transaction connection.
@@ -59,12 +48,12 @@ const validateReferences = async (conn, personId, locationId, registeredBy) => {
   }
 
   const [users] = await conn.query(
-    "SELECT user_id FROM users WHERE user_id = ?",
+    "SELECT user_id FROM users WHERE user_id = ? AND is_active = 1",
     [registeredBy],
   );
 
   if (users.length === 0) {
-    throw new Error("The selected registered user does not exist.");
+    throw new Error("Authenticated user account not found or inactive.");
   }
 };
 
@@ -77,16 +66,18 @@ const createDeath = async (req, res) => {
     person_id,
     location_id,
     registration_date,
-    registered_by,
     death_date,
     cause_of_death,
   } = req.body;
+
+  // Get the logged-in user's ID from JWT middleware
+  const registered_by = req.user?.user_id;
 
   // Validate required fields
   if (!person_id || !registration_date || !registered_by || !death_date) {
     return res.status(400).json({
       message:
-        "Person ID, registration date, registered by, and death date are required.",
+        "Person ID, registration date, death date are required, and user must be authenticated.",
     });
   }
 
@@ -97,7 +88,7 @@ const createDeath = async (req, res) => {
     !isValidOptionalId(location_id)
   ) {
     return res.status(400).json({
-      message: "Invalid person, location, or registered user ID.",
+      message: "Invalid person or location ID.",
     });
   }
 

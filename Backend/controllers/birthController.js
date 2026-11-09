@@ -1,111 +1,17 @@
 const connection = require("../config/db");
-
-// ==================== VALIDATION HELPERS ====================
-
-const isPositiveInteger = (value) => {
-  if (
-    value === undefined ||
-    value === null ||
-    (typeof value === "string" && value.trim() === "")
-  ) {
-    return false;
-  }
-
-  const number = Number(value);
-  return Number.isSafeInteger(number) && number > 0;
-};
-
-const isValidDate = (value) => {
-  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
-    return false;
-  }
-
-  const date = new Date(`${value}T00:00:00.000Z`);
-
-  return (
-    !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value
-  );
-};
-
-const isEmptyId = (value) =>
-  value === undefined || value === null || value === "";
-
-const normalizeOptionalId = (value) =>
-  isEmptyId(value) ? null : Number(value);
-
-const validateOptionalId = (field, value) => {
-  if (!isEmptyId(value) && !isPositiveInteger(value)) {
-    return `${field} must be a positive integer or null`;
-  }
-
-  return null;
-};
-
-const handleDatabaseError = (error, res, message) => {
-  console.error(message, error);
-
-  if (error.code === "ER_NO_REFERENCED_ROW_2") {
-    return res.status(400).json({
-      message: "One or more referenced IDs do not exist",
-    });
-  }
-
-  if (error.code === "ER_DUP_ENTRY") {
-    return res.status(409).json({
-      message: "This birth record conflicts with an existing record",
-    });
-  }
-
-  return res.status(500).json({
-    message: "A database error occurred while processing the birth record",
-  });
-};
-
-const rollbackResponse = (res, statusCode, message) => {
-  connection.rollback((error) => {
-    if (error) {
-      console.error("Birth transaction rollback error:", error);
-    }
-
-    return res.status(statusCode).json({ message });
-  });
-};
-
-// Checks that a referenced person exists.
-const checkPersonExists = (personId, callback) => {
-  connection.query(
-    "SELECT person_id FROM persons WHERE person_id = ? LIMIT 1",
-    [personId],
-    (error, rows) => {
-      if (error) return callback(error, false);
-      return callback(null, rows.length > 0);
-    },
-  );
-};
-
-const checkUserExists = (userId, callback) => {
-  connection.query(
-    "SELECT user_id FROM users WHERE user_id = ? LIMIT 1",
-    [userId],
-    (error, rows) => {
-      if (error) return callback(error, false);
-      return callback(null, rows.length > 0);
-    },
-  );
-};
-
-const checkLocationExists = (locationId, callback) => {
-  if (locationId === null) return callback(null, true);
-
-  connection.query(
-    "SELECT location_id FROM locations WHERE location_id = ? LIMIT 1",
-    [locationId],
-    (error, rows) => {
-      if (error) return callback(error, false);
-      return callback(null, rows.length > 0);
-    },
-  );
-};
+const { 
+  isPositiveInteger, 
+  isValidDate, 
+  isEmptyId, 
+  normalizeOptionalId, 
+  validateOptionalId,
+  isValidCause,
+  isValidReason
+} = require("../utils/validators");
+const { 
+  handleDatabaseError, 
+  rollbackResponseAsync 
+} = require("../utils/dbErrors");
 
 // ==================== CREATE BIRTH ====================
 
@@ -114,22 +20,24 @@ const createBirth = async (req, res) => {
     person_id,
     location_id,
     registration_date,
-    registered_by,
     father_id,
     mother_id,
   } = req.body;
 
+  // Get the logged-in user's ID from JWT middleware
+  const registered_by = req.user?.user_id;
+
   // 1. Required fields validation
   if (isEmptyId(person_id) || !registration_date || isEmptyId(registered_by)) {
     return res.status(400).json({
-      message: "person_id, registration_date, and registered_by are required",
+      message: "person_id and registration_date are required, and user must be authenticated",
     });
   }
 
   // 2. Positive integer validation
-  if (!isPositiveInteger(person_id) || !isPositiveInteger(registered_by)) {
+  if (!isPositiveInteger(person_id)) {
     return res.status(400).json({
-      message: "person_id and registered_by must be positive integers",
+      message: "person_id must be a positive integer",
     });
   }
 
@@ -237,9 +145,9 @@ const createBirth = async (req, res) => {
       }
     }
 
-    // 12. Check registering user exists
+    // 12. Check registering user exists (should always exist since they're authenticated)
     const [userRows] = await conn.query(
-      "SELECT user_id FROM users WHERE user_id = ?",
+      "SELECT user_id FROM users WHERE user_id = ? AND is_active = 1",
       [registeredBy],
     );
 
@@ -247,8 +155,8 @@ const createBirth = async (req, res) => {
       await conn.rollback();
       transactionStarted = false;
 
-      return res.status(400).json({
-        message: "Registering user does not exist",
+      return res.status(401).json({
+        message: "Authenticated user account not found or inactive",
       });
     }
 
@@ -329,10 +237,8 @@ const createBirth = async (req, res) => {
 
     console.error("Create birth error:", error);
 
-    return res.status(500).json({
-      message: "Failed to create birth record",
-      error: error.message,
-    });
+    // Use the database error handler utility
+    return handleDatabaseError(error, res, "Create birth");
   } finally {
     // 18. Release connection back to pool
     if (conn) {
@@ -461,43 +367,50 @@ const getBirthById = (req, res) => {
 
 // ==================== UPDATE BIRTH ====================
 
-const updateBirth = (req, res) => {
+const updateBirth = async (req, res) => {
   const { id } = req.params;
 
   const {
     person_id,
     location_id,
     registration_date,
-    registered_by,
     father_id,
     mother_id,
     status,
   } = req.body;
 
+  // Get the logged-in user's ID from JWT
+  const registeredBy = req.user?.user_id;
+
+  // 1. Validate authenticated user
+  if (!registeredBy) {
+    return res.status(401).json({
+      message: "Unauthorized. Please login first.",
+    });
+  }
+
+  // 2. Validate birth ID
   if (!isPositiveInteger(id)) {
     return res.status(400).json({
       message: "Invalid birth ID",
     });
   }
 
-  if (
-    isEmptyId(person_id) ||
-    !registration_date ||
-    isEmptyId(registered_by) ||
-    !status
-  ) {
+  // 3. Validate required fields
+  if (isEmptyId(person_id) || !registration_date || !status) {
     return res.status(400).json({
-      message:
-        "person_id, registration_date, registered_by, and status are required",
+      message: "person_id, registration_date, and status are required",
     });
   }
 
-  if (!isPositiveInteger(person_id) || !isPositiveInteger(registered_by)) {
+  // 4. Validate positive integer person ID
+  if (!isPositiveInteger(person_id)) {
     return res.status(400).json({
-      message: "person_id and registered_by must be positive integers",
+      message: "person_id must be a positive integer",
     });
   }
 
+  // 5. Validate optional IDs
   for (const [field, value] of [
     ["location_id", location_id],
     ["father_id", father_id],
@@ -512,12 +425,14 @@ const updateBirth = (req, res) => {
     }
   }
 
+  // 6. Validate registration date
   if (!isValidDate(registration_date)) {
     return res.status(400).json({
       message: "registration_date must be a valid date in YYYY-MM-DD format",
     });
   }
 
+  // 7. Validate status
   const allowedStatuses = ["Pending", "Active", "Cancelled"];
 
   if (!allowedStatuses.includes(status)) {
@@ -526,12 +441,13 @@ const updateBirth = (req, res) => {
     });
   }
 
+  // 8. Normalize IDs
   const personId = Number(person_id);
-  const registeredBy = Number(registered_by);
   const locationId = normalizeOptionalId(location_id);
   const fatherId = normalizeOptionalId(father_id);
   const motherId = normalizeOptionalId(mother_id);
 
+  // 9. Validate family relationships
   if (fatherId !== null && fatherId === motherId) {
     return res.status(400).json({
       message: "Father and mother must be different persons",
@@ -544,15 +460,18 @@ const updateBirth = (req, res) => {
     });
   }
 
-  connection.beginTransaction((transactionError) => {
-    if (transactionError) {
-      console.error("Begin update birth transaction error:", transactionError);
+  let conn;
+  let transactionStarted = false;
 
-      return res.status(500).json({
-        message: "Failed to start transaction",
-      });
-    }
+  try {
+    // 10. Get dedicated database connection
+    conn = await connection.promise().getConnection();
 
+    // 11. Start transaction
+    await conn.beginTransaction();
+    transactionStarted = true;
+
+    // 12. Find birth record and lock it
     const findSql = `
       SELECT b.record_id, vr.status AS current_status
       FROM births b
@@ -563,202 +482,185 @@ const updateBirth = (req, res) => {
       FOR UPDATE
     `;
 
-    connection.query(findSql, [Number(id)], (findError, rows) => {
-      if (findError) {
-        return connection.rollback(() => {
-          console.error("Find birth record error:", findError);
+    const [rows] = await conn.query(findSql, [Number(id)]);
 
-          return res.status(500).json({
-            message: "Failed to find birth record",
-          });
-        });
-      }
+    if (rows.length === 0) {
+      await conn.rollback();
+      transactionStarted = false;
 
-      if (rows.length === 0) {
-        return rollbackResponse(res, 404, "Birth record not found");
-      }
-
-      if (rows[0].current_status === "Cancelled") {
-        return rollbackResponse(
-          res,
-          409,
-          "Cancelled birth records cannot be updated",
-        );
-      }
-
-      // Do not use update to cancel an existing record.
-      // The dedicated cancelBirth endpoint records the cancellation reason.
-      if (status === "Cancelled") {
-        return rollbackResponse(
-          res,
-          400,
-          "Use the cancellation endpoint to cancel a birth record",
-        );
-      }
-
-      const recordId = rows[0].record_id;
-
-      checkPersonExists(personId, (personError, personExists) => {
-        if (personError) {
-          return rollbackResponse(res, 500, "Failed to validate child");
-        }
-
-        if (!personExists) {
-          return rollbackResponse(res, 400, "Person does not exist");
-        }
-
-        const checkFather = (callback) => {
-          if (fatherId === null) return callback(null, true);
-          checkPersonExists(fatherId, callback);
-        };
-
-        checkFather((fatherError, fatherExists) => {
-          if (fatherError) {
-            return rollbackResponse(res, 500, "Failed to validate father");
-          }
-
-          if (!fatherExists) {
-            return rollbackResponse(res, 400, "Father does not exist");
-          }
-
-          const checkMother = (callback) => {
-            if (motherId === null) return callback(null, true);
-            checkPersonExists(motherId, callback);
-          };
-
-          checkMother((motherError, motherExists) => {
-            if (motherError) {
-              return rollbackResponse(res, 500, "Failed to validate mother");
-            }
-
-            if (!motherExists) {
-              return rollbackResponse(res, 400, "Mother does not exist");
-            }
-
-            checkUserExists(registeredBy, (userError, userExists) => {
-              if (userError) {
-                return rollbackResponse(
-                  res,
-                  500,
-                  "Failed to validate registering user",
-                );
-              }
-
-              if (!userExists) {
-                return rollbackResponse(
-                  res,
-                  400,
-                  "Registering user does not exist",
-                );
-              }
-
-              checkLocationExists(
-                locationId,
-                (locationError, locationExists) => {
-                  if (locationError) {
-                    return rollbackResponse(
-                      res,
-                      500,
-                      "Failed to validate location",
-                    );
-                  }
-
-                  if (!locationExists) {
-                    return rollbackResponse(
-                      res,
-                      400,
-                      "Location does not exist",
-                    );
-                  }
-
-                  const updateRecordSql = `
-                  UPDATE vital_records
-                  SET person_id = ?,
-                      location_id = ?,
-                      registration_date = ?,
-                      registered_by = ?,
-                      status = ?
-                  WHERE record_id = ?
-                    AND record_type = 'Birth'
-                `;
-
-                  connection.query(
-                    updateRecordSql,
-                    [
-                      personId,
-                      locationId,
-                      registration_date,
-                      registeredBy,
-                      status,
-                      recordId,
-                    ],
-                    (recordError) => {
-                      if (recordError) {
-                        return connection.rollback(() => {
-                          handleDatabaseError(
-                            recordError,
-                            res,
-                            "Update birth vital record error:",
-                          );
-                        });
-                      }
-
-                      const updateBirthSql = `
-                      UPDATE births
-                      SET father_id = ?,
-                          mother_id = ?
-                      WHERE birth_id = ?
-                        AND record_id = ?
-                    `;
-
-                      connection.query(
-                        updateBirthSql,
-                        [fatherId, motherId, Number(id), recordId],
-                        (birthError) => {
-                          if (birthError) {
-                            return connection.rollback(() => {
-                              handleDatabaseError(
-                                birthError,
-                                res,
-                                "Update birth details error:",
-                              );
-                            });
-                          }
-
-                          connection.commit((commitError) => {
-                            if (commitError) {
-                              return connection.rollback(() => {
-                                console.error(
-                                  "Commit birth update error:",
-                                  commitError,
-                                );
-
-                                return res.status(500).json({
-                                  message:
-                                    "Failed to save updated birth record",
-                                });
-                              });
-                            }
-
-                            return res.status(200).json({
-                              message: "Birth record updated successfully",
-                              birth_id: Number(id),
-                              record_id: recordId,
-                              status,
-                            });
-                          });
-                        },
-                      );
-                    },
-                  );
-                },
-              );
-            });
-          });
-        });
+      return res.status(404).json({
+        message: "Birth record not found",
       });
+    }
+
+    if (rows[0].current_status === "Cancelled") {
+      await conn.rollback();
+      transactionStarted = false;
+
+      return res.status(409).json({
+        message: "Cancelled birth records cannot be updated",
+      });
+    }
+
+    // Cancellation must use the dedicated cancellation endpoint
+    if (status === "Cancelled") {
+      await conn.rollback();
+      transactionStarted = false;
+
+      return res.status(400).json({
+        message: "Use the cancellation endpoint to cancel a birth record",
+      });
+    }
+
+    const recordId = rows[0].record_id;
+
+    // 13. Check child exists
+    const [childRows] = await conn.query(
+      "SELECT person_id FROM persons WHERE person_id = ?",
+      [personId],
+    );
+
+    if (childRows.length === 0) {
+      await conn.rollback();
+      transactionStarted = false;
+
+      return res.status(400).json({
+        message: "Person does not exist",
+      });
+    }
+
+    // 14. Check father exists
+    if (fatherId !== null) {
+      const [fatherRows] = await conn.query(
+        "SELECT person_id FROM persons WHERE person_id = ?",
+        [fatherId],
+      );
+
+      if (fatherRows.length === 0) {
+        await conn.rollback();
+        transactionStarted = false;
+
+        return res.status(400).json({
+          message: "Father does not exist",
+        });
+      }
+    }
+
+    // 15. Check mother exists
+    if (motherId !== null) {
+      const [motherRows] = await conn.query(
+        "SELECT person_id FROM persons WHERE person_id = ?",
+        [motherId],
+      );
+
+      if (motherRows.length === 0) {
+        await conn.rollback();
+        transactionStarted = false;
+
+        return res.status(400).json({
+          message: "Mother does not exist",
+        });
+      }
+    }
+
+    // 16. Check authenticated user exists and is active
+    const [userRows] = await conn.query(
+      "SELECT user_id FROM users WHERE user_id = ? AND is_active = 1",
+      [registeredBy],
+    );
+
+    if (userRows.length === 0) {
+      await conn.rollback();
+      transactionStarted = false;
+
+      return res.status(401).json({
+        message: "Authenticated user not found or inactive",
+      });
+    }
+
+    // 17. Check location exists
+    if (locationId !== null) {
+      const [locationRows] = await conn.query(
+        "SELECT location_id FROM locations WHERE location_id = ?",
+        [locationId],
+      );
+
+      if (locationRows.length === 0) {
+        await conn.rollback();
+        transactionStarted = false;
+
+        return res.status(400).json({
+          message: "Location does not exist",
+        });
+      }
+    }
+
+    // 18. Update vital_records
+    const updateRecordSql = `
+      UPDATE vital_records
+      SET person_id = ?,
+          location_id = ?,
+          registration_date = ?,
+          registered_by = ?,
+          status = ?
+      WHERE record_id = ?
+        AND record_type = 'Birth'
+    `;
+
+    await conn.query(updateRecordSql, [
+      personId,
+      locationId,
+      registration_date,
+      registeredBy,
+      status,
+      recordId,
+    ]);
+
+    // 19. Update births
+    const updateBirthSql = `
+      UPDATE births
+      SET father_id = ?,
+          mother_id = ?
+      WHERE birth_id = ?
+        AND record_id = ?
+    `;
+
+    await conn.query(updateBirthSql, [
+      fatherId,
+      motherId,
+      Number(id),
+      recordId,
+    ]);
+
+    // 20. Commit transaction
+    await conn.commit();
+    transactionStarted = false;
+
+    return res.status(200).json({
+      message: "Birth record updated successfully",
+      birth_id: Number(id),
+      record_id: recordId,
+      status,
     });
-  });
+  } catch (error) {
+    // 21. Rollback if an error occurs
+    if (conn && transactionStarted) {
+      try {
+        await conn.rollback();
+      } catch (rollbackError) {
+        console.error("Birth update rollback error:", rollbackError);
+      }
+    }
+
+    console.error("Update birth error:", error);
+
+    return handleDatabaseError(error, res, "Update birth record error:");
+  } finally {
+    // 22. Release connection
+    if (conn) {
+      conn.release();
+    }
+  }
 };
 
 // ==================== CANCEL BIRTH ====================

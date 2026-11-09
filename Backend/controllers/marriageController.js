@@ -55,6 +55,110 @@ const handleDatabaseError = (error, res, defaultMessage) => {
 };
 
 // =====================================================
+// VALIDATE MARRIAGE PERSON GENDERS
+// person1 must be Male
+// person2 must be Female
+// =====================================================
+
+const validateMarriageGenders = (person1, person2, res) => {
+  if (!person1 || !person2) {
+    res.status(400).json({
+      message: "Both persons must exist",
+    });
+    return false;
+  }
+
+  if (String(person1.gender).trim().toLowerCase() !== "male") {
+    res.status(400).json({
+      message: "Person 1 must be Male",
+    });
+    return false;
+  }
+
+  if (String(person2.gender).trim().toLowerCase() !== "female") {
+    res.status(400).json({
+      message: "Person 2 must be Female",
+    });
+    return false;
+  }
+
+  return true;
+};
+
+// =====================================================
+// CHECK MARRIAGE REFERENCES
+// =====================================================
+
+const checkMarriageReferences = (
+  person1_id,
+  person2_id,
+  registered_by,
+  location_id,
+  res,
+  callback,
+) => {
+  const sql = `
+    SELECT
+      (SELECT gender FROM persons WHERE person_id = ?) AS person1_gender,
+      (SELECT gender FROM persons WHERE person_id = ?) AS person2_gender,
+      (SELECT COUNT(*) FROM users WHERE user_id = ?) AS user_exists,
+      (SELECT COUNT(*) FROM locations WHERE location_id = ?) AS location_exists
+  `;
+
+  connection.query(
+    sql,
+    [
+      Number(person1_id),
+      Number(person2_id),
+      Number(registered_by),
+      location_id == null || location_id === "" ? null : Number(location_id),
+    ],
+    (error, rows) => {
+      if (error) {
+        return handleDatabaseError(
+          error,
+          res,
+          "Failed to validate marriage references",
+        );
+      }
+
+      const refs = rows[0];
+
+      if (refs.person1_gender == null || refs.person2_gender == null) {
+        return res.status(400).json({
+          message: "Both persons must exist",
+        });
+      }
+
+      if (!Number(refs.user_exists)) {
+        return res.status(400).json({
+          message: "registered_by user does not exist",
+        });
+      }
+
+      if (
+        location_id != null &&
+        location_id !== "" &&
+        !Number(refs.location_exists)
+      ) {
+        return res.status(400).json({
+          message: "location_id does not exist",
+        });
+      }
+
+      const person1 = { gender: refs.person1_gender };
+      const person2 = { gender: refs.person2_gender };
+
+      if (!validateMarriageGenders(person1, person2, res)) {
+        return;
+      }
+
+      callback();
+    },
+  );
+};
+
+// =====================================================
 // CREATE MARRIAGE
 // =====================================================
 
@@ -122,154 +226,134 @@ const createMarriage = (req, res) => {
     });
   }
 
-  // 6. Check that the referenced records exist
-  const checkSql = `
-    SELECT
-      (SELECT COUNT(*) FROM persons WHERE person_id = ?) AS person1_exists,
-      (SELECT COUNT(*) FROM persons WHERE person_id = ?) AS person2_exists,
-      (SELECT COUNT(*) FROM users WHERE user_id = ?) AS user_exists,
-      (SELECT COUNT(*) FROM locations WHERE location_id = ?) AS location_exists
-  `;
-
-  connection.query(
-    checkSql,
-    [
-      Number(person1_id),
-      Number(person2_id),
-      Number(registered_by),
-      location_id == null || location_id === "" ? null : Number(location_id),
-    ],
-    (checkError, rows) => {
-      if (checkError) {
-        return handleDatabaseError(
-          checkError,
-          res,
-          "Failed to validate marriage references",
-        );
-      }
-
-      const refs = rows[0];
-
-      if (!Number(refs.person1_exists) || !Number(refs.person2_exists)) {
-        return res.status(400).json({
-          message: "Both persons must exist before creating a marriage",
-        });
-      }
-
-      if (!Number(refs.user_exists)) {
-        return res.status(400).json({
-          message: "registered_by user does not exist",
-        });
-      }
-
-      if (
-        location_id != null &&
-        location_id !== "" &&
-        !Number(refs.location_exists)
-      ) {
-        return res.status(400).json({
-          message: "location_id does not exist",
-        });
-      }
-
-      // 7. Create both records in one transaction
-      connection.beginTransaction((transactionError) => {
-        if (transactionError) {
+  // 6. Validate references and genders
+  checkMarriageReferences(
+    person1_id,
+    person2_id,
+    registered_by,
+    location_id,
+    res,
+    () => {
+      // 7. Get an individual connection from the pool
+      connection.getConnection((getConnectionError, dbConnection) => {
+        if (getConnectionError) {
           return handleDatabaseError(
-            transactionError,
+            getConnectionError,
             res,
-            "Failed to start marriage transaction",
+            "Failed to get database connection",
           );
         }
 
-        const vitalRecordSql = `
-          INSERT INTO vital_records
-          (
-            person_id,
-            location_id,
-            record_type,
-            registration_date,
-            registered_by,
-            status
-          )
-          VALUES (?, ?, 'Marriage', ?, ?, 'Pending')
-        `;
+        // 8. Start transaction
+        dbConnection.beginTransaction((transactionError) => {
+          if (transactionError) {
+            dbConnection.release();
 
-        connection.query(
-          vitalRecordSql,
-          [
-            null,
-            location_id == null || location_id === ""
-              ? null
-              : Number(location_id),
-            registration_date,
-            Number(registered_by),
-          ],
-          (recordError, recordResult) => {
-            if (recordError) {
-              return connection.rollback(() => {
-                handleDatabaseError(
-                  recordError,
-                  res,
-                  "Failed to create marriage vital record",
-                );
-              });
-            }
+            return handleDatabaseError(
+              transactionError,
+              res,
+              "Failed to start marriage transaction",
+            );
+          }
 
-            const record_id = recordResult.insertId;
+          const vitalRecordSql = `
+            INSERT INTO vital_records
+            (
+              person_id,
+              location_id,
+              record_type,
+              registration_date,
+              registered_by,
+              status
+            )
+            VALUES (?, ?, 'Marriage', ?, ?, 'Pending')
+          `;
 
-            const marriageSql = `
-              INSERT INTO marriages
-              (
-                record_id,
-                person1_id,
-                person2_id,
-                marriage_date
-              )
-              VALUES (?, ?, ?, ?)
-            `;
+          dbConnection.query(
+            vitalRecordSql,
+            [
+              null,
+              location_id == null || location_id === ""
+                ? null
+                : Number(location_id),
+              registration_date,
+              Number(registered_by),
+            ],
+            (recordError, recordResult) => {
+              if (recordError) {
+                return dbConnection.rollback(() => {
+                  dbConnection.release();
 
-            connection.query(
-              marriageSql,
-              [
-                record_id,
-                Number(person1_id),
-                Number(person2_id),
-                marriage_date,
-              ],
-              (marriageError, marriageResult) => {
-                if (marriageError) {
-                  return connection.rollback(() => {
-                    handleDatabaseError(
-                      marriageError,
-                      res,
-                      "Failed to create marriage details",
-                    );
-                  });
-                }
+                  handleDatabaseError(
+                    recordError,
+                    res,
+                    "Failed to create marriage vital record",
+                  );
+                });
+              }
 
-                connection.commit((commitError) => {
-                  if (commitError) {
-                    return connection.rollback(() => {
+              const record_id = recordResult.insertId;
+
+              const marriageSql = `
+                INSERT INTO marriages
+                (
+                  record_id,
+                  person1_id,
+                  person2_id,
+                  marriage_date
+                )
+                VALUES (?, ?, ?, ?)
+              `;
+
+              dbConnection.query(
+                marriageSql,
+                [
+                  record_id,
+                  Number(person1_id),
+                  Number(person2_id),
+                  marriage_date,
+                ],
+                (marriageError, marriageResult) => {
+                  if (marriageError) {
+                    return dbConnection.rollback(() => {
+                      dbConnection.release();
+
                       handleDatabaseError(
-                        commitError,
+                        marriageError,
                         res,
-                        "Failed to save marriage record",
+                        "Failed to create marriage details",
                       );
                     });
                   }
 
-                  return res.status(201).json({
-                    message: "Marriage record created successfully",
-                    record_id,
-                    marriage_id: marriageResult.insertId,
-                    status: "Pending",
+                  // 9. Commit transaction
+                  dbConnection.commit((commitError) => {
+                    if (commitError) {
+                      return dbConnection.rollback(() => {
+                        dbConnection.release();
+
+                        handleDatabaseError(
+                          commitError,
+                          res,
+                          "Failed to save marriage record",
+                        );
+                      });
+                    }
+
+                    dbConnection.release();
+
+                    return res.status(201).json({
+                      message: "Marriage record created successfully",
+                      record_id,
+                      marriage_id: marriageResult.insertId,
+                      status: "Pending",
+                    });
                   });
-                });
-              },
-            );
-          },
-        );
+                },
+              );
+            },
+          );
+        });
       });
     },
   );
@@ -497,9 +581,9 @@ const updateMarriage = (req, res) => {
     });
   }
 
-  // Check the marriage exists before updating.
+  // Check whether marriage exists
   const checkSql = `
-    SELECT m.marriage_id
+    SELECT m.marriage_id, vr.status
     FROM marriages m
     INNER JOIN vital_records vr
       ON vr.record_id = m.record_id
@@ -522,55 +606,14 @@ const updateMarriage = (req, res) => {
       });
     }
 
-    const referenceSql = `
-      SELECT
-        (SELECT COUNT(*) FROM persons WHERE person_id = ?) AS person1_exists,
-        (SELECT COUNT(*) FROM persons WHERE person_id = ?) AS person2_exists,
-        (SELECT COUNT(*) FROM users WHERE user_id = ?) AS user_exists,
-        (SELECT COUNT(*) FROM locations WHERE location_id = ?) AS location_exists
-    `;
-
-    connection.query(
-      referenceSql,
-      [
-        Number(person1_id),
-        Number(person2_id),
-        Number(registered_by),
-        location_id == null || location_id === "" ? null : Number(location_id),
-      ],
-      (referenceError, rows) => {
-        if (referenceError) {
-          return handleDatabaseError(
-            referenceError,
-            res,
-            "Failed to validate marriage references",
-          );
-        }
-
-        const refs = rows[0];
-
-        if (!Number(refs.person1_exists) || !Number(refs.person2_exists)) {
-          return res.status(400).json({
-            message: "Both persons must exist",
-          });
-        }
-
-        if (!Number(refs.user_exists)) {
-          return res.status(400).json({
-            message: "registered_by user does not exist",
-          });
-        }
-
-        if (
-          location_id != null &&
-          location_id !== "" &&
-          !Number(refs.location_exists)
-        ) {
-          return res.status(400).json({
-            message: "location_id does not exist",
-          });
-        }
-
+    // Validate persons, genders, user and location
+    checkMarriageReferences(
+      person1_id,
+      person2_id,
+      registered_by,
+      location_id,
+      res,
+      () => {
         const sql = `
           UPDATE vital_records vr
           INNER JOIN marriages m
@@ -604,7 +647,7 @@ const updateMarriage = (req, res) => {
             marriage_date,
             Number(id),
           ],
-          (error, result) => {
+          (error) => {
             if (error) {
               return handleDatabaseError(
                 error,
@@ -613,7 +656,6 @@ const updateMarriage = (req, res) => {
               );
             }
 
-            // AffectedRows may be 0 when values have not changed.
             return res.status(200).json({
               message: "Marriage record updated successfully",
               marriage_id: Number(id),
@@ -674,13 +716,13 @@ const cancelMarriage = (req, res) => {
 
     if (result.affectedRows === 0) {
       const checkSql = `
-          SELECT vr.status
-          FROM marriages m
-          INNER JOIN vital_records vr
-            ON vr.record_id = m.record_id
-          WHERE m.marriage_id = ?
-            AND vr.record_type = 'Marriage'
-        `;
+        SELECT vr.status
+        FROM marriages m
+        INNER JOIN vital_records vr
+          ON vr.record_id = m.record_id
+        WHERE m.marriage_id = ?
+          AND vr.record_type = 'Marriage'
+      `;
 
       return connection.query(checkSql, [Number(id)], (checkError, rows) => {
         if (checkError) {

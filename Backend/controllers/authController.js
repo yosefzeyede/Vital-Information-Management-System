@@ -37,14 +37,23 @@ const loginUser = (req, res) => {
     });
   }
 
-  // 4. Find user by username
+  // 4. Find user by username with Amharic information
   const sql = `
     SELECT
       user_id,
       username,
       password,
       role,
-      is_active
+      is_active,
+      amharic_first_name,
+      amharic_father_name,
+      amharic_grandfather_name,
+      amharic_full_name,
+      english_first_name,
+      english_middle_name,
+      english_last_name,
+      phone_number,
+      email
     FROM users
     WHERE username = ?
     LIMIT 1
@@ -107,11 +116,11 @@ const loginUser = (req, res) => {
         },
         process.env.JWT_SECRET,
         {
-          expiresIn: "10h",
+          expiresIn: "3h",
         },
       );
 
-      // 10. Return token and safe user information
+      // 10. Return token and safe user information with Amharic data
       return res.status(200).json({
         message: "Login successful",
         token,
@@ -119,6 +128,15 @@ const loginUser = (req, res) => {
           user_id: user.user_id,
           username: user.username,
           role: user.role,
+          amharic_first_name: user.amharic_first_name,
+          amharic_father_name: user.amharic_father_name,
+          amharic_grandfather_name: user.amharic_grandfather_name,
+          amharic_full_name: user.amharic_full_name,
+          english_first_name: user.english_first_name,
+          english_middle_name: user.english_middle_name,
+          english_last_name: user.english_last_name,
+          phone_number: user.phone_number,
+          email: user.email,
         },
       });
     } catch (error) {
