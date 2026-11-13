@@ -7,6 +7,7 @@ const {
   getCertificateById,
   updateCertificate,
   cancelCertificate,
+  downloadCertificatePdf,
 } = require("../controllers/certificateController");
 
 const verifyToken = require("../middleware/authMiddleware");
@@ -26,7 +27,12 @@ router.get(
   authorizeRoles("admin", "officer"),
   getAllCertificates,
 );
-
+router.get(
+  "/:id/download",
+  verifyToken,
+  authorizeRoles("admin", "officer"),
+  downloadCertificatePdf,
+);
 router.get(
   "/:id",
   verifyToken,

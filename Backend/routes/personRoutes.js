@@ -17,7 +17,12 @@ const authorizeRoles = require("../middleware/authorizeRoles");
 router.get("/", verifyToken, authorizeRoles("admin", "officer"), getPersons);
 
 router.post("/", verifyToken, authorizeRoles("admin", "officer"), createPerson);
-
+router.get(
+  "/search",
+  verifyToken,
+  authorizeRoles("admin", "officer"),
+  searchPersons,
+);
 router.get(
   "/:id",
   verifyToken,

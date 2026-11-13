@@ -2,7 +2,8 @@ const connection = require("../config/db");
 const dashboard = async (req, res) => {
   try {
     const db = connection.promise();
-
+    const test = `SELECT * FROM persons;`;
+    const tester = await db.query(test);
     const sql = `
       SELECT
         (SELECT COUNT(*) FROM persons) AS total_persons,
@@ -51,6 +52,7 @@ const dashboard = async (req, res) => {
     res.status(200).json({
       message: "Dashboard summary retrieved successfully",
       summary: rows[0],
+      sumery1: tester,
     });
   } catch (error) {
     console.error("Dashboard summary error:", error.message);
